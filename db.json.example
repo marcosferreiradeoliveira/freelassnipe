@@ -1,0 +1,16 @@
+{
+  "projects": [],
+  "config": {
+    "geminiApiKey": "",
+    "geminiModel": "gemini-2.5-flash-lite",
+    "freelasEmail": "",
+    "freelasPassword": "",
+    "freelasSessionCookie": "",
+    "playwrightHeadless": true,
+    "autoSubmit": false,
+    "maxProposalsPerDay": 10,
+    "blacklistKeywords": [],
+    "whitelistKeywords": []
+  },
+  "logs": []
+}

@@ -1,0 +1,6 @@
+{
+  "name": "99freelas Sniper Automation",
+  "description": "An AI-powered job scraper and proposal sniper automation pipeline for 99Freelas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
