@@ -11,6 +11,12 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { runSubmitWorker, openLoginBrowser } from './lib/submit-proposals.ts';
 import { runAutopilotBatch } from './lib/autopilot.ts';
+import { PLATFORM, buildJobsListUrl } from './lib/platform-config.ts';
+import {
+  fetchWorkanaJobsPageHtml,
+  parseWorkanaJobsFromHtml,
+  workanaJobToProject
+} from './lib/workana-scrape.ts';
 import { Project, ProjectStatus, SystemLog, SystemConfig } from './src/types';
 
 dotenv.config();
@@ -161,112 +167,22 @@ app.post('/api/projects/reset', (req, res) => {
   db.projects = [];
   db.logs = [];
   writeDB(db);
-  addLog('info', 'Banco de dados limpo. Execute uma varredura para importar projetos reais do 99freelas.');
+  addLog('info', 'Banco de dados limpo. Execute uma varredura para importar projetos reais do Workana.');
   res.json({ success: true });
 });
 
 // Scraper Automation (`/api/scrape`)
-const SCRAPE_CATEGORY = 'web-mobile-e-software';
-const SCRAPE_START_PAGE = 4;
-
-const SCRAPE_FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/png,*/*;q=0.8',
-  'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8'
-};
-
-function decodeHtmlText(text: string): string {
-  const entityMap: Record<string, string> = {
-    amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
-    aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú',
-    atilde: 'ã', otilde: 'õ', ccirc: 'ç', auml: 'ä', ouml: 'ö', uuml: 'ü',
-    Aacute: 'Á', Eacute: 'É', Iacute: 'Í', Oacute: 'Ó', Uacute: 'Ú',
-    Atilde: 'Ã', Otilde: 'Õ', Ccedil: 'Ç'
-  };
-
-  return text
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/&([a-z]+);/gi, (entity, name) => entityMap[name] ?? entity)
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function buildProjectsPageUrl(page: number): string {
-  return `https://www.99freelas.com.br/projects?categoria=${SCRAPE_CATEGORY}&page=${page}`;
-}
-
-async function fetchProjectsPageHtml(page: number): Promise<string> {
-  const targetUrl = buildProjectsPageUrl(page);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-  try {
-    const response = await fetch(targetUrl, {
-      signal: controller.signal,
-      headers: SCRAPE_FETCH_HEADERS
-    });
-    const html = await response.text();
-    clearTimeout(timeoutId);
-    return html;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    throw error;
-  }
-}
-
-function isExclusiveProjectHtml(itemHtml: string): boolean {
-  return /flat_project_exclusive|Projeto exclusivo|projeto exclusivo/i.test(itemHtml);
-}
+const SCRAPE_START_PAGE = PLATFORM.scrapePage;
 
 function getPublicProjects(projects: Project[]): Project[] {
   return projects.filter(p => !p.isExclusive);
 }
 
-function parseProjectsFromHtml(html: string): Project[] {
-  if (!html.includes('result-item')) return [];
-
-  const parsedProjects: Project[] = [];
-  const projectMatches = html.matchAll(/<li[^>]*class="[^"]*result-item[^"]*"[^>]*data-id="(\d+)"([\s\S]*?)<\/li>/gi);
-
-  for (const match of projectMatches) {
-    const fullItemHtml = match[0];
-    if (isExclusiveProjectHtml(fullItemHtml)) continue;
-
-    const projectId = match[1];
-    const itemHtml = match[2];
-
-    const titleMatch = itemHtml.match(/<h1[^>]*class="title"[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!titleMatch) continue;
-
-    const relativeUrl = titleMatch[1];
-    if (!relativeUrl.includes('/project/')) continue;
-
-    const descMatch = itemHtml.match(/<div[^>]*class="item-text description formatted-text"[^>]*data-content="([^"]*)"/i);
-    const bidsMatch = itemHtml.match(/Propostas:\s*<b>(\d+)<\/b>/i);
-    const skillsList: string[] = [];
-
-    for (const skillMatch of itemHtml.matchAll(/<a[^>]*class="habilidade"[^>]*>([\s\S]*?)<\/a>/gi)) {
-      skillsList.push(decodeHtmlText(skillMatch[1]));
-    }
-
-    parsedProjects.push({
-      id: `proj_${projectId}`,
-      title: decodeHtmlText(titleMatch[2]),
-      description: descMatch ? decodeHtmlText(descMatch[1]) : '',
-      skills: skillsList.length > 0 ? skillsList : ['Web Development'],
-      budget: 'Combinar',
-      bidsCount: bidsMatch ? parseInt(bidsMatch[1], 10) : 0,
-      url: `https://www.99freelas.com.br${relativeUrl}`,
-      status: ProjectStatus.SEEN,
-      timestamp: new Date().toISOString(),
-      isExclusive: false
-    });
-  }
-
-  return parsedProjects;
+function parseProjectsFromWorkanaHtml(html: string): Project[] {
+  const jobs = parseWorkanaJobsFromHtml(html);
+  return jobs
+    .filter((job) => !job.isInvite)
+    .map((job) => workanaJobToProject(job));
 }
 
 interface ScrapeResult {
@@ -299,39 +215,37 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
 
   try {
     if (!quiet) {
-      addLog('info', 'Iniciando varredura em 99Freelas...');
+      addLog('info', `Iniciando varredura em ${PLATFORM.name}...`);
     }
 
     const db = readDB();
     const { whitelistKeywords, blacklistKeywords } = db.config;
-    const targetUrl = buildProjectsPageUrl(SCRAPE_START_PAGE);
+    const targetUrl = buildJobsListUrl(SCRAPE_START_PAGE);
 
     if (!quiet) {
-      addLog('info', `Conectando ao catálogo (página ${SCRAPE_START_PAGE} em diante): ${targetUrl}`);
+      addLog('info', `Conectando ao catálogo (página ${SCRAPE_START_PAGE}): ${targetUrl}`);
     }
 
     let html = '';
     try {
-      html = await fetchProjectsPageHtml(SCRAPE_START_PAGE);
+      html = await fetchWorkanaJobsPageHtml(SCRAPE_START_PAGE);
     } catch (e: any) {
       addLog('warning', `Erro ao carregar página ${SCRAPE_START_PAGE}: ${e.message}`);
     }
 
-    const parsedProjects = html ? parseProjectsFromHtml(html) : [];
-    const exclusiveSkipped = html
-      ? [...html.matchAll(/<li[^>]*class="[^"]*result-item[^"]*"[^>]*data-id="(\d+)"([\s\S]*?)<\/li>/gi)]
-          .filter(m => isExclusiveProjectHtml(m[0])).length
-      : 0;
+    const allJobs = html ? parseWorkanaJobsFromHtml(html) : [];
+    const inviteSkipped = allJobs.filter((job) => job.isInvite).length;
+    const parsedProjects = html ? parseProjectsFromWorkanaHtml(html) : [];
 
     if (!quiet) {
       if (parsedProjects.length > 0) {
-        addLog('info', `Página ${SCRAPE_START_PAGE}: ${parsedProjects.length} projetos públicos extraídos (${exclusiveSkipped} exclusivos ignorados).`);
-      } else if (exclusiveSkipped > 0) {
-        addLog('warning', `Página ${SCRAPE_START_PAGE}: ${exclusiveSkipped} projetos exclusivos/premium encontrados e ignorados.`);
+        addLog('info', `Página ${SCRAPE_START_PAGE}: ${parsedProjects.length} projetos extraídos (${inviteSkipped} convites ignorados).`);
+      } else if (inviteSkipped > 0) {
+        addLog('warning', `Página ${SCRAPE_START_PAGE}: ${inviteSkipped} convites exclusivos encontrados e ignorados.`);
       }
 
       if (parsedProjects.length === 0) {
-        addLog('warning', `Nenhum projeto real encontrado na página ${SCRAPE_START_PAGE}. Verifique conexão ou mudanças no site.`);
+        addLog('warning', `Nenhum projeto encontrado na página ${SCRAPE_START_PAGE}. Verifique conexão ou mudanças no site.`);
       }
     }
 
@@ -534,7 +448,7 @@ async function generateAISingleProject(projectId: string): Promise<Project> {
 
     const promptText = `
 Você é um Engenheiro de Software Freelancer Full Stack altamente experiente, especialista em automações de sistemas, web scrapers, bots e APIs Web.
-Por favor, analise a seguinte oportunidade de trabalho listada no 99Freelas e crie uma proposta de orçamento estratégica.
+Analise a seguinte oportunidade listada no Workana e crie uma carta de apresentação estratégica para envio de proposta.
 
 TÍTULO DO PROJETO: "${project.title}"
 ORÇAMENTO INFORMADO: "${project.budget}"
@@ -544,17 +458,17 @@ DESCRIÇÃO COMPLETA DO CLIENTE:
 ${project.description}
 """
 
-Instruções para a Proposta ( proposal ):
-1. Deve agir como um freelancer profissional especialista que entende as dores desse problema em específico.
-2. Seja DIRETO, focado inteiramente em prover a solução das dores do cliente. EVITE blá-blá-blá, introduções genéricas ("Olá meu caro cliente, espero que este e-mail o encontre bem..."), cumprimentos longos e floreios de marketing. Vá direto ao como você resolveria o projeto dele. No máximo de 3-4 parágrafos curtos.
-3. Demonstre competência listando brevemente as tecnologias ideais que você usaria (ex: se for automação web, mencione Playwright/Puppeteer e tratamento de desconexão/perda de sessão).
-4. Sugira uma abordagem para o preço sugerido ( suggestedPrice ) e o tempo estimado de conclusão em dias ( suggestedTime ).
-5. A linguagem do texto gerado da proposta deve obedecer obrigatoriamente à mesma linguagem do briefing enviado (normalmente português do Brasil).
+Instruções para a Proposta (proposal):
+1. Aja como freelancer profissional que entende as dores específicas do projeto.
+2. Seja DIRETO — sem introduções genéricas ou floreios de marketing. Máximo de 3-4 parágrafos curtos.
+3. Demonstre competência listando brevemente as tecnologias ideais (ex: Playwright/Puppeteer para automação web).
+4. Sugira preço (suggestedPrice) em USD compatível com o orçamento do cliente e prazo em dias (suggestedTime).
+5. Use a mesma língua do briefing (normalmente português do Brasil).
 
-Retorne os resultados estritamente em formato JSON estruturado com os seguintes campos exatos:
+Retorne estritamente em JSON:
 {
-  "proposal": "texto da proposta aqui",
-  "suggestedPrice": preço numérico sugerido correspondente à faixa de orçamento dele em Reais,
+  "proposal": "texto da carta de apresentação",
+  "suggestedPrice": valor numérico em USD (ex: 150),
   "suggestedTime": dias estimados de entrega
 }
 `;
@@ -565,7 +479,7 @@ Retorne os resultados estritamente em formato JSON estruturado com os seguintes 
       model: activeModel,
       contents: promptText,
       config: {
-        systemInstruction: "Aja como um freelancer especialista focado em criar propostas de alto engajamento, assertivas e técnicas no 99Freelas.",
+        systemInstruction: "Aja como um freelancer especialista focado em criar cartas de apresentação de alto engajamento, assertivas e técnicas no Workana.",
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -576,7 +490,7 @@ Retorne os resultados estritamente em formato JSON estruturado com os seguintes 
             },
             suggestedPrice: {
               type: Type.NUMBER,
-              description: "Valor numérico recomendado em Reais BRL sugerido para o bid (ex: 750)."
+              description: "Valor numérico recomendado em USD sugerido para o bid (ex: 150)."
             },
             suggestedTime: {
               type: Type.INTEGER,
@@ -602,7 +516,7 @@ Retorne os resultados estritamente em formato JSON estruturado com os seguintes 
       postDb.projects[projIndex].status = ProjectStatus.PENDING_REVIEW;
       
       writeDB(postDb);
-      addLog('success', `Proposta Sniper para #${projectId} gerada com sucesso! Preço sugerido: R$ ${result.suggestedPrice}, Prazo: ${result.suggestedTime} dias.`, projectId);
+      addLog('success', `Proposta Sniper para #${projectId} gerada com sucesso! Preço sugerido: $${result.suggestedPrice} USD, Prazo: ${result.suggestedTime} dias.`, projectId);
       return postDb.projects[projIndex];
     } else {
       throw new Error("Projeto desapareceu durante processamento Gemini.");
@@ -663,7 +577,7 @@ app.post('/api/worker/run', async (req, res) => {
 // Abre browser visível para login manual — salva sessão no perfil persistente
 app.post('/api/auth/login', async (req, res) => {
   try {
-    addLog('info', 'Iniciando login manual no 99Freelas (perfil persistente)...');
+    addLog('info', `Iniciando login manual no ${PLATFORM.name} (perfil persistente)...`);
     const result = await openLoginBrowser((type, message) => addLog(type, message));
     if (result.success) {
       res.json(result);
@@ -736,7 +650,7 @@ async function startServer() {
 
   // Bind exclusively to Port 3000 on host 0.0.0.0
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[SERVER] 99freelas-sniper executando em http://localhost:${PORT}`);
+    console.log(`[SERVER] workana-sniper executando em http://localhost:${PORT}`);
     startAutoScrapeLoop();
   });
 }

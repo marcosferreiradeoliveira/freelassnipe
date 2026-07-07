@@ -408,7 +408,7 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-slate-200 to-cyan-400 bg-clip-text text-transparent">
-              99Freelas Sniper Automation
+              Workana Sniper Automation
             </h1>
             <p className="text-xs text-slate-400 flex items-center gap-1.5 mt-0.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-ping"></span>
@@ -516,9 +516,9 @@ export default function App() {
                 <p className="text-[10px] text-slate-500 mt-1">Lite é suficiente para gerar propostas curtas em JSON.</p>
               </div>
 
-              {/* Email 99Freelas */}
+              {/* Email Workana */}
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">E-mail de Login 99Freelas</label>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">E-mail de Login Workana</label>
                 <div className="relative">
                   <User className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-slate-500" />
                   <input
@@ -531,9 +531,9 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Senha 99Freelas */}
+              {/* Senha Workana */}
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Senha de Login 99Freelas</label>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">Senha de Login Workana</label>
                 <div className="relative">
                   <Lock className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-slate-500" />
                   <input
@@ -555,7 +555,7 @@ export default function App() {
 
               {/* Cookies */}
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Cookie de Sessão 99Freelas</label>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">Cookie de Sessão Workana</label>
                 <textarea
                   placeholder="Opcional — sincronizado automaticamente pelo perfil persistente"
                   rows={2}
@@ -564,8 +564,8 @@ export default function App() {
                   className="w-full text-xs bg-slate-950 border border-slate-800 focus:border-cyan-500 outline-none rounded p-2 text-slate-200 font-mono resize-none"
                 />
                 <p className="text-[10px] text-slate-500 mt-1">
-                  Se o Cloudflare bloquear o login automático, faça login no <strong>Chrome normal</strong>, copie os 4 cookies
-                  (JSESSIONID, kmlicin, kmlicn, sgcn) do DevTools e cole aqui.
+                  Se o Cloudflare bloquear o login automático, faça login no <strong>Chrome normal</strong>, copie o cookie
+                  <strong> workana_session</strong> do DevTools e cole aqui.
                 </p>
                 <button
                   type="button"
@@ -574,7 +574,7 @@ export default function App() {
                   className="mt-2 w-full flex items-center justify-center gap-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-3 rounded-lg transition-colors"
                 >
                   <Lock className="w-3.5 h-3.5" />
-                  {isOpeningLogin ? 'Aguardando login no browser...' : 'Login no 99Freelas (Perfil Persistente)'}
+                  {isOpeningLogin ? 'Aguardando login no browser...' : 'Login no Workana (Perfil Persistente)'}
                 </button>
               </div>
 
@@ -709,7 +709,7 @@ export default function App() {
               className="py-1.5 px-3 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-extrabold text-xs rounded transition flex items-center gap-1.5 shadow"
             >
               {isScraping ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-              Scrape 99Freelas
+              Scrape Workana
             </button>
           </div>
 
@@ -843,7 +843,7 @@ export default function App() {
                     referrerPolicy="no-referrer"
                     className="text-[10px] text-slate-400 hover:text-cyan-400 flex items-center gap-1 transition"
                   >
-                    Visto no 99Freelas
+                    Visto no Workana
                     <ExternalLink className="w-2.5 h-2.5" />
                   </a>
                 </div>

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { Project, ProjectStatus, SystemLog } from '../src/types';
+import { PLATFORM } from './platform-config.ts';
 import {
   createPersistentBrowserSession,
   ensureAuthenticated,
@@ -42,60 +43,133 @@ function writeDatabase(db: any) {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
 }
 
-function getBidUrl(projectUrl: string): string {
-  const url = new URL(projectUrl);
-  url.pathname = url.pathname.replace('/project/', '/project/bid/');
-  url.search = '';
-  return url.toString();
+async function openBidForm(page: any, jobUrl: string, log: SubmitWorkerOptions['log']) {
+  const write = log || defaultLog;
+  await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForTimeout(2500);
+
+  const bidSelectors = [
+    '#bid_button',
+    'a[href*="/messages"]',
+    'button:has-text("Enviar")',
+    'a:has-text("proposta")',
+    'a:has-text("Proposta")',
+    'button:has-text("proposta")'
+  ];
+
+  for (const selector of bidSelectors) {
+    const el = page.locator(selector).first();
+    if (await el.isVisible().catch(() => false)) {
+      const href = await el.getAttribute('href').catch(() => null);
+      if (href?.includes('/signup')) continue;
+      write('info', `[DISPARADOR] Clicando em enviar proposta (${selector})...`);
+      await el.click();
+      await page.waitForTimeout(2000);
+      return;
+    }
+  }
 }
 
-async function confirmBidModals(page: any) {
-  for (let attempt = 0; attempt < 6; attempt++) {
-    await page.waitForTimeout(1200);
+async function fillWorkanaBidForm(page: any, project: Project) {
+  const proposalSelectors = [
+    'textarea[name="message"]',
+    'textarea[name="bid[message]"]',
+    '#message',
+    'textarea'
+  ];
 
-    const safetyModal = page.locator('.modal.modal-confirmacao-proposta-pergunta');
-    if (await safetyModal.isVisible().catch(() => false)) {
-      const checkbox = safetyModal.locator('.confirm-action, input[type="checkbox"]').first();
-      if (await checkbox.isVisible().catch(() => false)) {
-        await checkbox.check();
+  let proposalInput = null;
+  for (const sel of proposalSelectors) {
+    const loc = page.locator(sel).first();
+    if (await loc.isVisible().catch(() => false)) {
+      proposalInput = loc;
+      break;
+    }
+  }
+
+  if (!proposalInput) {
+    throw new Error('Campo de proposta não encontrado.');
+  }
+
+  await proposalInput.fill(project.generatedProposal || '');
+
+  const priceSelectors = [
+    'input[name*="amount"]',
+    'input[name*="budget"]',
+    'input[name*="price"]',
+    '#amount',
+    'input[type="number"]'
+  ];
+
+  if (project.suggestedPrice) {
+    for (const sel of priceSelectors) {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible().catch(() => false)) {
+        await loc.fill(String(project.suggestedPrice));
+        break;
       }
-      await safetyModal.locator('.btn-acao').click();
-      continue;
     }
+  }
 
-    const feeModal = page.locator('.modal.modal-info-taxa-oferta-final');
-    if (await feeModal.isVisible().catch(() => false)) {
-      await feeModal.locator('.btn-confirmar').click();
-      continue;
+  const timeSelectors = [
+    'input[name*="delivery"]',
+    'input[name*="deadline"]',
+    'input[name*="days"]',
+    'select[name*="delivery"]'
+  ];
+
+  if (project.suggestedTime) {
+    for (const sel of timeSelectors) {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible().catch(() => false)) {
+        const tag = await loc.evaluate((el: Element) => el.tagName.toLowerCase()).catch(() => 'input');
+        if (tag === 'select') {
+          await loc.selectOption(String(project.suggestedTime)).catch(() => {});
+        } else {
+          await loc.fill(String(project.suggestedTime));
+        }
+        break;
+      }
     }
-
-    const genericConfirm = page.locator('.modal:visible .btn-acao, .modal:visible button:has-text("Sim")').first();
-    if (await genericConfirm.isVisible().catch(() => false)) {
-      await genericConfirm.click();
-      continue;
-    }
-
-    break;
   }
 }
 
-async function waitForSubmissionResult(page: any, projectUrl: string): Promise<'success' | 'error' | 'pending'> {
-  const projectPath = new URL(projectUrl).pathname;
-
-  try {
-    await page.waitForURL(
-      (url: URL) => !url.pathname.includes('/project/bid/'),
-      { timeout: 20000 }
-    );
-    if (page.url().includes(projectPath.replace('/project/', '/project/')) || !page.url().includes('/project/bid/')) {
-      return 'success';
+async function confirmWorkanaModals(page: any) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await page.waitForTimeout(1000);
+    const confirm = page.locator('button:has-text("Confirmar"), button:has-text("Enviar"), input[type="submit"]').first();
+    if (await confirm.isVisible().catch(() => false)) {
+      const text = await confirm.innerText().catch(() => '');
+      if (/cancelar|voltar/i.test(text)) continue;
     }
-  } catch {
-    // still on bid page
+    const modalOk = page.locator('.modal:visible button.btn-primary, .modal:visible button.btn-inverse').first();
+    if (await modalOk.isVisible().catch(() => false)) {
+      await modalOk.click();
+    }
   }
+}
 
-  const errorText = await page.locator('.general-error-msg, .alert-error, .mensagem-erro, .input-error-msg .error-msg').first().innerText().catch(() => '');
+async function waitForWorkanaSubmissionResult(page: any): Promise<'success' | 'error' | 'pending'> {
+  await page.waitForTimeout(3000);
+
+  const successText = await page
+    .locator('text=/proposta enviada|proposal sent|sucesso|success/i')
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (successText) return 'success';
+
+  const errorText = await page
+    .locator('.alert-danger, .error, .form-error, [class*="error"]')
+    .first()
+    .innerText()
+    .catch(() => '');
   if (errorText.trim()) return 'error';
+
+  if (!page.url().includes('/login') && !page.url().includes('/signup')) {
+    const stillOnForm = await page.locator('textarea').first().isVisible().catch(() => false);
+    if (!stillOnForm) return 'success';
+  }
 
   return 'pending';
 }
@@ -109,100 +183,76 @@ async function submitSingleProject(
   log: SubmitWorkerOptions['log']
 ) {
   const write = log || defaultLog;
-  const bidUrl = getBidUrl(project.url);
+  const jobUrl = project.url;
 
-  write('info', `[DISPARADOR] Abrindo formulário de proposta: ${bidUrl}`, project.id);
-  await page.goto(bidUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.waitForTimeout(2000);
+  write('info', `[DISPARADOR] Abrindo projeto Workana: ${jobUrl}`, project.id);
 
-  if (page.url().includes('/login') || page.url().includes('/register')) {
-    write('warning', `[DISPARADOR] Redirecionado para login. Tentando reautenticar...`, project.id);
-
+  if (page.url().includes('/login') || page.url().includes('/signup')) {
     if (config.freelasSessionCookie?.trim()) {
       await injectCookiesIntoContext(context, config.freelasSessionCookie, write);
     }
-
-    await page.goto(bidUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
   }
 
-  if (page.url().includes('/login') || page.url().includes('/register')) {
-    write('error', `[DISPARADOR] Sessão inválida ao abrir o projeto. Clique em "Login no 99Freelas" e tente novamente.`, project.id);
+  try {
+    await openBidForm(page, jobUrl, write);
+  } catch (err: any) {
+    write('error', `[DISPARADOR] Erro ao abrir projeto: ${err.message}`, project.id);
     project.status = ProjectStatus.FAILED;
     return false;
   }
 
-  const exclusiveBlock = page.locator('text=/projetos exclusivos|aguarde até que ele seja liberado/i');
-  if (await exclusiveBlock.count() > 0) {
-    write('warning', `[DISPARADOR] Projeto exclusivo — requer plano pago ou aguardar liberação pública.`, project.id);
+  if (page.url().includes('/login') || page.url().includes('/signup')) {
+    write('error', `[DISPARADOR] Sessão inválida. Renove o login no ${PLATFORM.name}.`, project.id);
+    project.status = ProjectStatus.FAILED;
+    return false;
+  }
+
+  if (!project.generatedProposal) {
+    write('error', `[DISPARADOR] Texto da proposta vazio. Gere com IA antes de enviar.`, project.id);
     project.status = ProjectStatus.FAILED;
     return false;
   }
 
   try {
-    await page.waitForSelector('#proposta', { timeout: 15000 });
-  } catch {
-    write('error', `[DISPARADOR] Formulário de proposta não encontrado. Projeto encerrado ou indisponível.`, project.id);
+    await fillWorkanaBidForm(page, project);
+  } catch (err: any) {
+    write('error', `[DISPARADOR] ${err.message}`, project.id);
     project.status = ProjectStatus.FAILED;
     return false;
-  }
-
-  const proposalInput = page.locator('#proposta').first();
-  const priceInput = page.locator('#oferta').first();
-  const timeInput = page.locator('#duracao-estimada').first();
-  const submitButton = page.locator('#btnConcluirEnvioProposta').first();
-
-  if (!project.generatedProposal) {
-    write('error', `[DISPARADOR] Texto da proposta vazio. Gere a proposta com IA antes de enviar.`, project.id);
-    project.status = ProjectStatus.FAILED;
-    return false;
-  }
-
-  await proposalInput.fill(project.generatedProposal);
-
-  if (project.suggestedPrice) {
-    await priceInput.fill(String(project.suggestedPrice));
-    await priceInput.blur();
-    await page.waitForTimeout(500);
-  }
-
-  if (project.suggestedTime) {
-    await timeInput.fill(String(project.suggestedTime));
-  }
-
-  const maxLen = await proposalInput.evaluate((el: HTMLTextAreaElement) => el.maxLength).catch(() => 3000);
-  if (maxLen > 0 && project.generatedProposal.length > maxLen) {
-    project.generatedProposal = project.generatedProposal.slice(0, maxLen);
-    await proposalInput.fill(project.generatedProposal);
   }
 
   if (!shouldSubmit) {
-    write('warning', `[MODO MANUAL] Formulário preenchido, envio real desativado (AUTO_SUBMIT=false).`, project.id);
+    write('warning', `[MODO MANUAL] Formulário preenchido, envio desativado.`, project.id);
     project.status = ProjectStatus.PENDING_REVIEW;
     return false;
   }
 
   const preSubmitDelay = 3000 + Math.floor(Math.random() * 7000);
-  write('info', `[DISPARADOR] Aguardando ${Math.round(preSubmitDelay / 1000)}s antes de enviar (comportamento humano)...`, project.id);
+  write('info', `[DISPARADOR] Aguardando ${Math.round(preSubmitDelay / 1000)}s antes de enviar...`, project.id);
   await page.waitForTimeout(preSubmitDelay);
 
-  write('info', `[DISPARADOR] Enviando proposta (R$ ${project.suggestedPrice}, ${project.suggestedTime} dias)...`, project.id);
-  await submitButton.click();
-  await confirmBidModals(page);
+  const submitButton = page
+    .locator('button[type="submit"], input[type="submit"], button:has-text("Enviar"), button:has-text("Submit")')
+    .first();
 
-  const result = await waitForSubmissionResult(page, project.url);
+  if (!(await submitButton.isVisible().catch(() => false))) {
+    write('error', `[DISPARADOR] Botão de envio não encontrado.`, project.id);
+    project.status = ProjectStatus.FAILED;
+    return false;
+  }
+
+  write('info', `[DISPARADOR] Enviando proposta ($${project.suggestedPrice}, ${project.suggestedTime} dias)...`, project.id);
+  await submitButton.click();
+  await confirmWorkanaModals(page);
+
+  const result = await waitForWorkanaSubmissionResult(page);
   if (result === 'success') {
-    write('success', `[DISPARADOR] PROPOSTA SUBMETIDA COM SUCESSO para "${project.title}"! Valor: R$ ${project.suggestedPrice}, Prazo: ${project.suggestedTime} dias.`, project.id);
+    write('success', `[DISPARADOR] PROPOSTA ENVIADA: "${project.title}"!`, project.id);
     project.status = ProjectStatus.SENT;
     return true;
   }
 
-  const errMsg = await page.locator('.general-error-msg, .alert-error, .mensagem-erro, .input-error-msg .error-msg').first().innerText().catch(() => '');
-  if (errMsg.trim()) {
-    write('error', `[DISPARADOR] 99freelas rejeitou a proposta: ${errMsg.trim()}`, project.id);
-  } else {
-    write('error', `[DISPARADOR] Proposta não confirmada. Marque o checkbox de confirmação ou verifique os campos obrigatórios.`, project.id);
-  }
+  write('error', `[DISPARADOR] Proposta não confirmada no ${PLATFORM.name}. Verifique connects e perfil.`, project.id);
   project.status = ProjectStatus.FAILED;
   return false;
 }

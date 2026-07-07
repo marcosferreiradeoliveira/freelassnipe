@@ -7,4 +7,5 @@ coverage/
 .env*
 !.env.example
 .99freelas-profile/
+.workana-profile/
 db.json

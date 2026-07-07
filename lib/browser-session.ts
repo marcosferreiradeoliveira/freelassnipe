@@ -1,13 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import { PLATFORM } from './platform-config.ts';
 
 dotenv.config();
 
 const DB_FILE = path.join(process.cwd(), 'db.json');
-const SESSION_CHECK_URL = 'https://www.99freelas.com.br/dashboard';
 
-export const SESSION_COOKIE_NAMES = ['JSESSIONID', 'kmlicin', 'kmlicn', 'sgcn'] as const;
+export const SESSION_COOKIE_NAMES = PLATFORM.sessionCookieNames;
 
 type LogFn = (type: 'info' | 'warning' | 'error' | 'success', message: string) => void;
 
@@ -22,8 +22,7 @@ function writeDatabase(db: any) {
 }
 
 export function getUserDataDir(): string {
-  const dir = process.env.PLAYWRIGHT_USER_DATA_DIR || '.99freelas-profile';
-  return path.resolve(process.cwd(), dir);
+  return path.resolve(process.cwd(), PLATFORM.profileDir);
 }
 
 export function usePersistentProfile(): boolean {
@@ -33,9 +32,17 @@ export function usePersistentProfile(): boolean {
 export function buildSessionCookieString(
   cookies: Array<{ name: string; value: string }>
 ): string {
-  return SESSION_COOKIE_NAMES.map((name) => cookies.find((c) => c.name === name))
+  const required = SESSION_COOKIE_NAMES.map((name) => cookies.find((c) => c.name === name))
     .filter(Boolean)
-    .map((c) => `${c!.name}=${c!.value}`)
+    .map((c) => `${c!.name}=${c!.value}`);
+
+  if (required.length > 0) {
+    return required.join('; ');
+  }
+
+  return cookies
+    .filter((c) => c.name && c.value)
+    .map((c) => `${c.name}=${c.value}`)
     .join('; ');
 }
 
@@ -45,21 +52,21 @@ export function parseSessionCookieString(cookieString: string) {
     return {
       name: name.trim(),
       value: valParts.join('=').trim(),
-      domain: 'www.99freelas.com.br',
+      domain: PLATFORM.cookieDomain,
       path: '/'
     };
   }).filter((c) => c.name && c.value);
 }
 
 export async function hasRequiredSessionCookies(context: any): Promise<boolean> {
-  const cookies = await context.cookies('https://www.99freelas.com.br');
+  const cookies = await context.cookies(PLATFORM.baseUrl);
   return SESSION_COOKIE_NAMES.every((name) =>
     cookies.some((c: { name: string; value: string }) => c.name === name && c.value)
   );
 }
 
 function isLoginUrl(url: string): boolean {
-  return url.includes('/login') || url.includes('/register');
+  return url.includes('/login') || url.includes('/signup') || url.includes('/register');
 }
 
 async function withProfileLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -124,7 +131,7 @@ async function launchPersistentContextSafe(
         channel
       });
     } catch {
-      write('warning', `Chrome "${channel}" não encontrado. Instale Google Chrome ou defina PLAYWRIGHT_CHANNEL=chromium. Usando Chromium do Playwright.`);
+      write('warning', `Chrome "${channel}" não encontrado. Usando Chromium do Playwright.`);
     }
   }
 
@@ -147,28 +154,23 @@ export async function syncSessionToDatabase(
   context: any,
   log?: LogFn
 ): Promise<boolean> {
-  const cookies = await context.cookies('https://www.99freelas.com.br');
+  const cookies = await context.cookies(PLATFORM.baseUrl);
   const sessionString = buildSessionCookieString(cookies);
 
-  if (!sessionString.includes('JSESSIONID=')) {
-    log?.('warning', 'Perfil ativo, mas JSESSIONID não encontrado.');
-    return false;
-  }
-
-  if (!sessionString.includes('kmlicin=') || !sessionString.includes('kmlicn=')) {
-    log?.('warning', 'Sessão incompleta: faltam cookies kmlicin/kmlicn. Faça login novamente no 99Freelas.');
+  if (!sessionString.includes('workana_session=')) {
+    log?.('warning', 'Perfil ativo, mas workana_session não encontrado.');
     return false;
   }
 
   const db = readDatabase();
   db.config.freelasSessionCookie = sessionString;
   writeDatabase(db);
-  log?.('success', 'Cookies completos sincronizados do perfil persistente para o banco.');
+  log?.('success', 'Cookies sincronizados do perfil persistente para o banco.');
   return true;
 }
 
 export async function navigateAndCheckSession(page: any, context?: any): Promise<boolean> {
-  await page.goto(SESSION_CHECK_URL, {
+  await page.goto(PLATFORM.sessionCheckUrl, {
     waitUntil: 'domcontentloaded',
     timeout: 30000
   });
@@ -196,7 +198,7 @@ export async function ensureLoggedInWithProfile(
   const allowManualLogin = options.allowManualLogin !== false;
   const loginTimeoutMs = options.loginTimeoutMs ?? 180000;
 
-  write('info', 'Verificando sessão autenticada em /dashboard...');
+  write('info', `Verificando sessão autenticada em ${PLATFORM.name}...`);
 
   if (await navigateAndCheckSession(page, context)) {
     await syncSessionToDatabase(context, write);
@@ -205,21 +207,21 @@ export async function ensureLoggedInWithProfile(
   }
 
   if (!allowManualLogin) {
-    write('error', 'Sessão expirada ou incompleta. Use "Login no 99Freelas" no dashboard para renovar.');
+    write('error', `Sessão expirada. Use "Login no ${PLATFORM.name}" no dashboard para renovar.`);
     return false;
   }
 
-  write('info', 'Faça login no 99Freelas na janela do browser (incluindo captcha se aparecer)...');
-  await page.goto('https://www.99freelas.com.br/login', {
+  write('info', `Faça login no ${PLATFORM.name} na janela do browser...`);
+  await page.goto(PLATFORM.loginUrl, {
     waitUntil: 'domcontentloaded',
     timeout: 30000
   });
 
   if (config.freelasEmail) {
-    await page.fill('#email', config.freelasEmail).catch(() => {});
+    await page.fill('input[name="email"], #email', config.freelasEmail).catch(() => {});
   }
   if (config.freelasPassword) {
-    await page.fill('#senha', config.freelasPassword).catch(() => {});
+    await page.fill('input[name="password"], #password', config.freelasPassword).catch(() => {});
   }
 
   const startedAt = Date.now();
@@ -227,7 +229,7 @@ export async function ensureLoggedInWithProfile(
     await page.waitForTimeout(2000);
 
     if (await detectCloudflareBlock(page)) {
-      write('error', 'Cloudflare bloqueou o browser automático ("Verification failed"). Faça login no Chrome normal e cole os cookies manualmente no campo acima.');
+      write('error', 'Captcha bloqueou o login automático. Faça login no Chrome normal e cole o cookie workana_session.');
       return false;
     }
 
@@ -241,7 +243,7 @@ export async function ensureLoggedInWithProfile(
     }
   }
 
-  write('error', 'Tempo esgotado aguardando login manual no 99Freelas.');
+  write('error', `Tempo esgotado aguardando login manual no ${PLATFORM.name}.`);
   return false;
 }
 
@@ -251,8 +253,8 @@ async function injectCookiesFromConfig(context: any, config: any, log?: LogFn): 
 
   if (!cookieString) return false;
 
-  if (!cookieString.includes('kmlicin=') || !cookieString.includes('kmlicn=')) {
-    write('error', 'Cookie de sessão incompleto no banco. Copie JSESSIONID, kmlicin, kmlicn e sgcn.');
+  if (!cookieString.includes('workana_session=')) {
+    write('error', 'Cookie incompleto. Copie workana_session (e dcstcookieii se houver) do DevTools.');
     return false;
   }
 
@@ -313,12 +315,9 @@ export async function openLoginBrowser(log?: LogFn): Promise<LoginBrowserResult>
       });
 
       if (!loggedIn) {
-        const cloudflareBlocked = await detectCloudflareBlock(page);
         return {
           success: false,
-          message: cloudflareBlocked
-            ? 'Cloudflare bloqueou o login automático. Abra www.99freelas.com.br no seu Chrome, faça login, copie os cookies (JSESSIONID, kmlicin, kmlicn, sgcn) e cole no campo acima.'
-            : 'Login não concluído. Verifique email/senha e complete o captcha no browser.'
+          message: `Login não concluído. Copie workana_session do Chrome após login em ${PLATFORM.baseUrl}.`
         };
       }
 
@@ -396,13 +395,4 @@ export async function ensureAuthenticated(
   }
 
   return injectCookiesFromConfig(context, config, write);
-}
-
-export async function revalidateSessionOnPage(page: any, context: any, log?: LogFn): Promise<boolean> {
-  const write = log || ((type, message) => console.log(`[${type.toUpperCase()}] ${message}`));
-  if (await navigateAndCheckSession(page, context)) {
-    return true;
-  }
-  write('warning', 'Sessão perdida durante o envio.');
-  return false;
 }
