@@ -50,6 +50,8 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isRunningWorker, setIsRunningWorker] = useState(false);
   const [isRunningAutopilot, setIsRunningAutopilot] = useState(false);
+  const [isContinuousAuto, setIsContinuousAuto] = useState(false);
+  const [isTogglingContinuousAuto, setIsTogglingContinuousAuto] = useState(false);
   const [isOpeningLogin, setIsOpeningLogin] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -97,6 +99,12 @@ export default function App() {
       if (logRes.ok) {
         const data = await logRes.json();
         setLogs(prev => JSON.stringify(prev) === JSON.stringify(data) ? prev : data);
+      }
+
+      const autoLoopRes = await fetch('/api/auto-loop/status');
+      if (autoLoopRes.ok) {
+        const data = await autoLoopRes.json();
+        setIsContinuousAuto(data.running === true);
       }
     } catch (e) {
       console.error('Failed to silent poll', e);
@@ -280,6 +288,32 @@ export default function App() {
       alert('Erro ao abrir browser de login.');
     } finally {
       setIsOpeningLogin(false);
+    }
+  };
+
+  const handleToggleContinuousAuto = async () => {
+    if (isTogglingContinuousAuto) return;
+
+    if (!isContinuousAuto && !confirm('Ativar modo automático?\n\nVarre o 99Freelas a cada 1 minuto e, ao encontrar projetos elegíveis (< 5 propostas), gera e envia propostas automaticamente.')) {
+      return;
+    }
+
+    setIsTogglingContinuousAuto(true);
+    try {
+      const endpoint = isContinuousAuto ? '/api/auto-loop/stop' : '/api/auto-loop/start';
+      const res = await fetch(endpoint, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Não foi possível alterar o modo automático.');
+        return;
+      }
+      setIsContinuousAuto(data.running === true);
+      await fetchLogs();
+    } catch (e) {
+      console.error('Continuous auto toggle error', e);
+      alert('Erro ao alterar modo automático.');
+    } finally {
+      setIsTogglingContinuousAuto(false);
     }
   };
 
@@ -607,8 +641,23 @@ export default function App() {
 
               {/* Whitelist Keywords */}
               <div className="border-t border-slate-800 pt-3">
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Palavras Whitelist (Filtro)</label>
-                <div className="flex gap-1.5 mb-2">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-slate-300">Palavras Whitelist (Filtro)</label>
+                  <button
+                    type="button"
+                    onClick={() => setConfig({ ...config, whitelistEnabled: config.whitelistEnabled === false })}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${config.whitelistEnabled !== false ? 'bg-cyan-500' : 'bg-slate-700'}`}
+                    title={config.whitelistEnabled !== false ? 'Whitelist ativa' : 'Whitelist desativada'}
+                  >
+                    <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${config.whitelistEnabled !== false ? 'translate-x-4' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500 mb-2">
+                  {config.whitelistEnabled !== false
+                    ? 'Ativa: só importa/gera propostas com palavras da lista.'
+                    : 'Desativada: todos os projetos passam (blacklist ainda vale).'}
+                </p>
+                <div className={`flex gap-1.5 mb-2 ${config.whitelistEnabled === false ? 'opacity-40 pointer-events-none' : ''}`}>
                   <input
                     type="text"
                     placeholder="Adicionar..."
@@ -625,7 +674,7 @@ export default function App() {
                     +
                   </button>
                 </div>
-                <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto p-1 bg-slate-950/60 rounded border border-slate-800">
+                <div className={`flex flex-wrap gap-1 max-h-24 overflow-y-auto p-1 bg-slate-950/60 rounded border border-slate-800 ${config.whitelistEnabled === false ? 'opacity-40' : ''}`}>
                   {config.whitelistKeywords.map(kw => (
                     <span key={kw} className="text-[9px] bg-slate-900 border border-cyan-950 text-cyan-400 px-1.5 py-0.5 rounded-full flex items-center gap-1">
                       {kw}
@@ -742,8 +791,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* Projects lists */}
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+          {/* Projects lists — mostra ~5 e rola o resto */}
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[calc(5*11rem)]">
             {filteredProjects.map(project => {
               const isSelected = project.id === selectedProjectId;
               return (
@@ -990,7 +1039,7 @@ export default function App() {
       </main>
 
       {/* LOWER SECTION: SYSTEM EXECUTION CONSOLE TRACE TERMINAL */}
-      <footer className="h-56 border-t border-slate-800/80 bg-slate-950 p-4 flex flex-col shrink-0 z-30">
+      <footer className="h-96 border-t border-slate-800/80 bg-slate-950 p-4 flex flex-col shrink-0 z-30">
         <div className="flex items-center justify-between pb-2 border-b border-slate-900 mb-2">
           <div className="flex items-center gap-2">
             <Terminal className="w-4 h-4 text-cyan-400 animate-pulse" />
@@ -998,6 +1047,22 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-[10px] font-mono text-slate-500">Auto-refresh ativo</span>
+            <button
+              onClick={handleToggleContinuousAuto}
+              disabled={isTogglingContinuousAuto}
+              className={`py-1 px-2 font-bold font-mono text-[10px] rounded transition flex items-center gap-1 shadow disabled:opacity-50 ${
+                isContinuousAuto
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-500 ring-1 ring-emerald-400/50 animate-pulse'
+                  : 'bg-slate-800 text-slate-200 hover:bg-slate-700 border border-slate-700'
+              }`}
+            >
+              {isTogglingContinuousAuto ? (
+                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+              ) : (
+                <Zap className={`w-2.5 h-2.5 ${isContinuousAuto ? 'fill-current' : ''}`} />
+              )}
+              {isContinuousAuto ? 'Automático ON' : 'Automático'}
+            </button>
             <button
               onClick={handleRunAutopilot}
               disabled={isRunningAutopilot || isRunningWorker}

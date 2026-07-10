@@ -48,4 +48,5 @@ export interface SystemConfig {
   maxProposalsPerDay: number;
   blacklistKeywords: string[];
   whitelistKeywords: string[];
+  whitelistEnabled: boolean;
 }

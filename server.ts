@@ -16,8 +16,10 @@ import { Project, ProjectStatus, SystemLog, SystemConfig } from './src/types';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3001', 10);
 const DB_FILE = path.join(process.cwd(), 'db.json');
+const LOGS_FILE = path.join(process.cwd(), 'logs.json');
+const MAX_LOGS = 500;
 
 app.use(express.json());
 
@@ -40,7 +42,8 @@ const DEFAULT_CONFIG: SystemConfig = {
   autoSubmit: process.env.AUTO_SUBMIT === 'true',
   maxProposalsPerDay: parseInt(process.env.MAX_PROPOSALS_PER_DAY || '10', 10),
   blacklistKeywords: ['design', 'logo', 'video', 'copywriter', 'tradutor', 'artes', 'redigi', 'escrever'],
-  whitelistKeywords: ['node', 'python', 'script', 'automação', 'automacao', 'bot', 'scrapper', 'raspar', 'ia', 'gemini', 'chatgpt', 'crawler', 'api', 'backend', 'vps', 'dados', 'integrar', 'integração']
+  whitelistKeywords: ['node', 'python', 'script', 'automação', 'automacao', 'bot', 'scrapper', 'raspar', 'ia', 'gemini', 'chatgpt', 'crawler', 'api', 'backend', 'vps', 'dados', 'integrar', 'integração'],
+  whitelistEnabled: true
 };
 
 function readDB(): DBStructure {
@@ -61,7 +64,9 @@ function readDB(): DBStructure {
   return initialDB;
 }
 
+// Grava o db.json de forma síncrona. Logs ficam num arquivo separado para não inchar este.
 function writeDB(data: DBStructure) {
+  data.logs = [];
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (error) {
@@ -69,8 +74,39 @@ function writeDB(data: DBStructure) {
   }
 }
 
+// ==========================================
+// LOG ENGINE (arquivo separado + gravação debounced)
+// ==========================================
+let logsCache: SystemLog[] = [];
+let logsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadLogs() {
+  try {
+    if (fs.existsSync(LOGS_FILE)) {
+      logsCache = JSON.parse(fs.readFileSync(LOGS_FILE, 'utf-8'));
+    }
+  } catch {
+    logsCache = [];
+  }
+}
+
+function flushLogs() {
+  try {
+    fs.writeFileSync(LOGS_FILE, JSON.stringify(logsCache), 'utf-8');
+  } catch (error) {
+    console.error('Error writing logs', error);
+  }
+}
+
+function scheduleLogsFlush() {
+  if (logsWriteTimer) return;
+  logsWriteTimer = setTimeout(() => {
+    logsWriteTimer = null;
+    flushLogs();
+  }, 2000);
+}
+
 function addLog(type: SystemLog['type'], message: string, projectId?: string) {
-  const db = readDB();
   const newLog: SystemLog = {
     id: `log_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
     timestamp: new Date().toISOString(),
@@ -78,11 +114,11 @@ function addLog(type: SystemLog['type'], message: string, projectId?: string) {
     message,
     projectId
   };
-  db.logs.unshift(newLog); // New logs at the beginning
-  if (db.logs.length > 500) {
-    db.logs = db.logs.slice(0, 500); // Caps logs at 500
+  logsCache.unshift(newLog);
+  if (logsCache.length > MAX_LOGS) {
+    logsCache.length = MAX_LOGS;
   }
-  writeDB(db);
+  scheduleLogsFlush();
   console.log(`[${type.toUpperCase()}] ${message}`);
 }
 
@@ -108,10 +144,10 @@ app.post('/api/config', (req, res) => {
   res.json(db.config);
 });
 
-// Get Database Projects (somente públicos, sem premium/exclusivos)
+// Get Database Projects
 app.get('/api/projects', (req, res) => {
   const db = readDB();
-  const projects = getPublicProjects(db.projects);
+  const projects = db.projects;
   res.json({
     projects,
     stats: {
@@ -161,13 +197,15 @@ app.post('/api/projects/reset', (req, res) => {
   db.projects = [];
   db.logs = [];
   writeDB(db);
+  logsCache = [];
+  flushLogs();
   addLog('info', 'Banco de dados limpo. Execute uma varredura para importar projetos reais do 99freelas.');
   res.json({ success: true });
 });
 
 // Scraper Automation (`/api/scrape`)
 const SCRAPE_CATEGORY = 'web-mobile-e-software';
-const SCRAPE_START_PAGE = 4;
+const SCRAPE_START_PAGE = parseInt(process.env.SCRAPE_START_PAGE || '1', 10);
 
 const SCRAPE_FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -195,7 +233,8 @@ function decodeHtmlText(text: string): string {
 }
 
 function buildProjectsPageUrl(page: number): string {
-  return `https://www.99freelas.com.br/projects?categoria=${SCRAPE_CATEGORY}&page=${page}`;
+  const base = `https://www.99freelas.com.br/projects?categoria=${SCRAPE_CATEGORY}`;
+  return page <= 1 ? base : `${base}&page=${page}`;
 }
 
 async function fetchProjectsPageHtml(page: number): Promise<string> {
@@ -233,7 +272,7 @@ function parseProjectsFromHtml(html: string): Project[] {
 
   for (const match of projectMatches) {
     const fullItemHtml = match[0];
-    if (isExclusiveProjectHtml(fullItemHtml)) continue;
+    const exclusive = isExclusiveProjectHtml(fullItemHtml);
 
     const projectId = match[1];
     const itemHtml = match[2];
@@ -262,7 +301,7 @@ function parseProjectsFromHtml(html: string): Project[] {
       url: `https://www.99freelas.com.br${relativeUrl}`,
       status: ProjectStatus.SEEN,
       timestamp: new Date().toISOString(),
-      isExclusive: false
+      isExclusive: exclusive
     });
   }
 
@@ -303,11 +342,11 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
     }
 
     const db = readDB();
-    const { whitelistKeywords, blacklistKeywords } = db.config;
+    const { whitelistKeywords, blacklistKeywords, whitelistEnabled } = db.config;
     const targetUrl = buildProjectsPageUrl(SCRAPE_START_PAGE);
 
     if (!quiet) {
-      addLog('info', `Conectando ao catálogo (página ${SCRAPE_START_PAGE} em diante): ${targetUrl}`);
+      addLog('info', `Conectando ao catálogo: ${targetUrl}`);
     }
 
     let html = '';
@@ -318,20 +357,16 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
     }
 
     const parsedProjects = html ? parseProjectsFromHtml(html) : [];
-    const exclusiveSkipped = html
-      ? [...html.matchAll(/<li[^>]*class="[^"]*result-item[^"]*"[^>]*data-id="(\d+)"([\s\S]*?)<\/li>/gi)]
-          .filter(m => isExclusiveProjectHtml(m[0])).length
-      : 0;
+    const exclusiveCount = parsedProjects.filter((p) => p.isExclusive).length;
+    const publicCount = parsedProjects.length - exclusiveCount;
 
     if (!quiet) {
       if (parsedProjects.length > 0) {
-        addLog('info', `Página ${SCRAPE_START_PAGE}: ${parsedProjects.length} projetos públicos extraídos (${exclusiveSkipped} exclusivos ignorados).`);
-      } else if (exclusiveSkipped > 0) {
-        addLog('warning', `Página ${SCRAPE_START_PAGE}: ${exclusiveSkipped} projetos exclusivos/premium encontrados e ignorados.`);
+        addLog('info', `Catálogo: ${parsedProjects.length} projetos extraídos (${publicCount} públicos, ${exclusiveCount} exclusivos).`);
       }
 
       if (parsedProjects.length === 0) {
-        addLog('warning', `Nenhum projeto real encontrado na página ${SCRAPE_START_PAGE}. Verifique conexão ou mudanças no site.`);
+        addLog('warning', 'Nenhum projeto encontrado. Verifique conexão ou mudanças no site.');
       }
     }
 
@@ -358,7 +393,7 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
         continue;
       }
 
-      if (whitelistKeywords.length > 0 && !hitsWhitelist) {
+      if (whitelistEnabled !== false && whitelistKeywords.length > 0 && !hitsWhitelist) {
         if (!quiet) {
           addLog('warning', `Filtro ativo: Projeto [${project.title.substring(0, 30)}...] ignorado por não conter termos técnicos da whitelist.`);
         }
@@ -421,6 +456,7 @@ function startAutoScrapeLoop() {
   console.log(`[SERVER] Varredura automática ativa a cada ${intervalMs / 1000}s.`);
 
   setInterval(() => {
+    if (continuousAutoRunning) return;
     runWebScrape({ quiet: true }).catch((err) => {
       addLog('error', `Falha na varredura automática: ${err.message}`);
     });
@@ -495,17 +531,19 @@ async function generateAISingleProject(projectId: string): Promise<Project> {
   // Verify technical/automation scope before spending Gemini tokens
   const titleLower = project.title.toLowerCase();
   const descLower = project.description.toLowerCase();
-  const { whitelistKeywords, blacklistKeywords, geminiApiKey, geminiModel } = db.config;
+  const { whitelistKeywords, blacklistKeywords, geminiApiKey, geminiModel, whitelistEnabled } = db.config;
 
-  const passesScope = whitelistKeywords.some((kw: string) => 
-    titleLower.includes(kw.toLowerCase()) || descLower.includes(kw.toLowerCase())
-  );
-  
-  if (!passesScope) {
-    project.status = ProjectStatus.FAILED;
-    writeDB(db);
-    addLog('warning', `[FILTRO IA COM ESCASSEZ] Projeto #${projectId} abortado antes de chamar o Gemini: Fora de escopo tech/automação.`, projectId);
-    throw new Error('Projeto abortado: Sem correspondência de escopo técnico.');
+  if (whitelistEnabled !== false) {
+    const passesScope = whitelistKeywords.some((kw: string) => 
+      titleLower.includes(kw.toLowerCase()) || descLower.includes(kw.toLowerCase())
+    );
+    
+    if (!passesScope) {
+      project.status = ProjectStatus.FAILED;
+      writeDB(db);
+      addLog('warning', `[FILTRO IA COM ESCASSEZ] Projeto #${projectId} abortado antes de chamar o Gemini: Fora de escopo tech/automação.`, projectId);
+      throw new Error('Projeto abortado: Sem correspondência de escopo técnico.');
+    }
   }
 
   // Update status to generating
@@ -533,29 +571,57 @@ async function generateAISingleProject(projectId: string): Promise<Project> {
     });
 
     const promptText = `
-Você é um Engenheiro de Software Freelancer Full Stack altamente experiente, especialista em automações de sistemas, web scrapers, bots e APIs Web.
-Por favor, analise a seguinte oportunidade de trabalho listada no 99Freelas e crie uma proposta de orçamento estratégica.
+Você é um Desenvolvedor Senior e Especialista em IA focado em conversão no 99Freelas. Seu objetivo é escrever propostas curtas, sem "papo de robô", focadas em resolver o problema do cliente imediatamente.
 
 TÍTULO DO PROJETO: "${project.title}"
-ORÇAMENTO INFORMADO: "${project.budget}"
+ORÇAMENTO INFORMADO PELO CLIENTE: "${project.budget}"
 HABILIDADES EXIGIDAS: ${project.skills.join(', ')}
 DESCRIÇÃO COMPLETA DO CLIENTE:
 """
 ${project.description}
 """
 
-Instruções para a Proposta ( proposal ):
-1. Deve agir como um freelancer profissional especialista que entende as dores desse problema em específico.
-2. Seja DIRETO, focado inteiramente em prover a solução das dores do cliente. EVITE blá-blá-blá, introduções genéricas ("Olá meu caro cliente, espero que este e-mail o encontre bem..."), cumprimentos longos e floreios de marketing. Vá direto ao como você resolveria o projeto dele. No máximo de 3-4 parágrafos curtos.
-3. Demonstre competência listando brevemente as tecnologias ideais que você usaria (ex: se for automação web, mencione Playwright/Puppeteer e tratamento de desconexão/perda de sessão).
-4. Sugira uma abordagem para o preço sugerido ( suggestedPrice ) e o tempo estimado de conclusão em dias ( suggestedTime ).
-5. A linguagem do texto gerado da proposta deve obedecer obrigatoriamente à mesma linguagem do briefing enviado (normalmente português do Brasil).
+DIRETRIZES DE PERSONALIDADE:
+- Escreva na mesma língua em que o anúncio está escrito.
+- Escreva como se estivesse respondendo um chat rápido. Nada de "Prezado" ou "Li seu projeto".
+- Use tom de parceria: "Fala, tudo bem? Vi seu projeto aqui e..."
+- Seja direto e técnico, mas sem ser chato.
 
-Retorne os resultados estritamente em formato JSON estruturado com os seguintes campos exatos:
+ESTRUTURA DA PROPOSTA (campo "proposal" — siga rigorosamente, nesta ordem):
+1. Gancho de Problema: comece direto no que ele quer resolver.
+2. Prova de Conceito: mencione um projeto do portfólio relacionado à dor dele.
+3. Proposta de Valor: sugira tecnologia ou caminho técnico rápido e prático.
+4. Teste Grátis: ofereça uma pequena entrega sem custo para validar (ex: protótipo, roteiro de automação). Mencione que a prova gratuita é de graça — só passar o WhatsApp que você envia.
+5. Pergunta de Fechamento: uma pergunta técnica que exija resposta.
+
+PORTFÓLIO DINÂMICO:
+- Se for IA/Sistemas/Automação: cite exatamente https://buildai.dev.br (só a home — NUNCA invente paths como /integracoes, /projetos, /ia etc.).
+- Se for Vídeo/Avatar/Conteúdo: cite exatamente https://www.youtube.com/@mobcontent (só o canal — NUNCA invente links de vídeos).
+- Pode descrever um caso em texto, mas o único URL permitido de site é https://buildai.dev.br.
+
+REGRAS DE FORMATAÇÃO DO CAMPO "proposal":
+- Pule uma linha obrigatoriamente após cada frase (use \\n\\n entre frases).
+- Máximo de 6 a 7 linhas/frases no total.
+- Não use negrito, títulos, listas, asteriscos ou fontes diferentes.
+- Proibido: "Minha proposta técnica", "Segue meu portfólio", "Cordialmente", "Prezado", "Atenciosamente".
+- O texto da proposta NÃO deve incluir valor em R$ nem prazo — isso vai em campos separados.
+
+CAMPOS NUMÉRICOS (fora do texto da proposta):
+- suggestedPrice: valor em Reais (BRL) para o campo do 99Freelas. O 99Freelas é uma plataforma MUITO competitiva e sensível a preço — clientes esperam lances baixos. NUNCA use valores de agência ou mercado internacional.
+  Faixas de referência no 99Freelas (priorize o lado BAIXO):
+  • Script simples, ajuste pontual, automação pequena: R$ 250 a R$ 600
+  • Integração API, bot, scraper, fluxo n8n: R$ 500 a R$ 1.200
+  • Projeto médio (sistema, dashboard, SaaS simples): R$ 1.000 a R$ 2.500
+  • Projeto complexo (só se o cliente deixar claro orçamento alto): R$ 2.500 a R$ 4.500 — teto raro
+  Regras: se o orçamento do cliente for "Combinar" ou não informado, sugira entre R$ 400 e R$ 900. Se houver faixa no anúncio, fique no terço INFERIOR da faixa. Prefira ganhar pelo volume e pelo teste grátis, não por preço alto. Na dúvida, sugira MENOS.
+  Nota: o sistema aplica fator de redução no valor final — não infle o número.
+- suggestedTime: dias estimados de entrega (realista, nem muito longo nem suspeito de ser rápido demais).
+
+Retorne estritamente em JSON:
 {
   "proposal": "texto da proposta aqui",
-  "suggestedPrice": preço numérico sugerido correspondente à faixa de orçamento dele em Reais,
-  "suggestedTime": dias estimados de entrega
+  "suggestedPrice": valor numérico em BRL,
+  "suggestedTime": dias estimados
 }
 `;
 
@@ -565,18 +631,18 @@ Retorne os resultados estritamente em formato JSON estruturado com os seguintes 
       model: activeModel,
       contents: promptText,
       config: {
-        systemInstruction: "Aja como um freelancer especialista focado em criar propostas de alto engajamento, assertivas e técnicas no 99Freelas.",
+        systemInstruction: "Você é um Desenvolvedor Senior e Especialista em IA no 99Freelas. Escreva propostas curtas, humanas, com tom de chat, estrutura de gancho+portfólio+valor+teste grátis+pergunta, sem formatação markdown. Preço e prazo vão só nos campos JSON numéricos.",
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             proposal: {
               type: Type.STRING,
-              description: "Proposta técnica de fechamento escrita em parágrafos diretos e profissionais focados na dor do projeto."
+              description: "Proposta curta estilo chat: gancho do problema, prova de portfólio (URL exato https://buildai.dev.br ou https://www.youtube.com/@mobcontent — sem paths inventados), valor técnico, teste grátis via WhatsApp, pergunta de fechamento. Uma linha em branco entre cada frase. Máx 6-7 frases. Sem markdown, listas ou preço no texto."
             },
             suggestedPrice: {
               type: Type.NUMBER,
-              description: "Valor numérico recomendado em Reais BRL sugerido para o bid (ex: 750)."
+              description: "Valor BRL competitivo para 99Freelas. Scripts R$250-600, integrações R$500-1200, médio R$1000-2500. Orçamento 'Combinar': R$400-900. O servidor aplica fator 0.5 no valor final."
             },
             suggestedTime: {
               type: Type.INTEGER,
@@ -590,6 +656,20 @@ Retorne os resultados estritamente em formato JSON estruturado com os seguintes 
 
     const responseText = response.text || '';
     const result = JSON.parse(responseText.trim());
+
+    if (typeof result.proposal === 'string') {
+      // Never invent paths like buildai.dev.br/integracoes — only the home URL.
+      result.proposal = result.proposal
+        .replace(/https?:\/\/(?:www\.)?buildai\.dev\.br\/[^\s)\]"']*/gi, 'https://buildai.dev.br')
+        .replace(/https?:\/\/(?:www\.)?buildai\.dev\.br(?![/\w])/gi, 'https://buildai.dev.br')
+        .replace(/https?:\/\/(?:www\.)?youtube\.com\/watch\?[^\s)\]"']*/gi, 'https://www.youtube.com/@mobcontent')
+        .replace(/https?:\/\/youtu\.be\/[^\s)\]"']*/gi, 'https://www.youtube.com/@mobcontent');
+    }
+
+    const priceFactor = parseFloat(process.env.PROPOSAL_PRICE_FACTOR || '0.5');
+    if (typeof result.suggestedPrice === 'number' && priceFactor > 0 && priceFactor !== 1) {
+      result.suggestedPrice = Math.max(120, Math.round(result.suggestedPrice * priceFactor));
+    }
 
     // Refresh DB and apply results to prevent overwritten states
     const postDb = readDB();
@@ -642,8 +722,7 @@ app.post('/api/generate', async (req, res) => {
 
 // Logs Endpoint
 app.get('/api/logs', (req, res) => {
-  const db = readDB();
-  res.json(db.logs);
+  res.json(logsCache);
 });
 
 // Manual Run Worker — envio real via Playwright
@@ -678,7 +757,115 @@ app.post('/api/auth/login', async (req, res) => {
 
 let autopilotRunning = false;
 
-// Autopilot: 10 primeiros "seen" → gerar → fila → enviar com pausas
+let continuousAutoRunning = false;
+let continuousAutoBusy = false;
+let continuousAutoTimer: ReturnType<typeof setTimeout> | null = null;
+
+function getAutopilotEligibleProjects() {
+  const db = readDB();
+  const maxBids = parseInt(process.env.AUTOPILOT_MAX_BIDS || '5', 10);
+  return db.projects
+    .filter((p) => p.status === ProjectStatus.SEEN)
+    .filter((p) => (p.bidsCount ?? 0) < maxBids)
+    .map((p) => ({ id: p.id, title: p.title }));
+}
+
+async function runContinuousAutoCycle() {
+  if (continuousAutoBusy || autopilotRunning) {
+    addLog('warning', '[AUTO-LOOP] Ciclo anterior ainda em execução. Pulando este tick.');
+    return;
+  }
+
+  continuousAutoBusy = true;
+
+  try {
+    addLog('info', '[AUTO-LOOP] Iniciando ciclo: varredura + geração + envio...');
+    const scrapeResult = await runWebScrape({ quiet: true });
+
+    if (!scrapeResult.success) {
+      addLog('warning', `[AUTO-LOOP] Varredura sem sucesso: ${scrapeResult.error || 'erro desconhecido'}`);
+      return;
+    }
+
+    const eligible = getAutopilotEligibleProjects();
+    if (eligible.length === 0) {
+      addLog('info', `[AUTO-LOOP] Varredura ok (+${scrapeResult.added} novos). Nenhum projeto elegível (< ${process.env.AUTOPILOT_MAX_BIDS || '5'} propostas).`);
+      return;
+    }
+
+    autopilotRunning = true;
+    addLog('info', `[AUTO-LOOP] ${eligible.length} projeto(s) elegível(is). Gerando e enviando propostas...`);
+
+    await runAutopilotBatch({
+      batchSize: eligible.length,
+      generateProject: (projectId) => generateAISingleProject(projectId),
+      getEligibleProjects: getAutopilotEligibleProjects,
+      log: (type, message, projectId) => addLog(type, message, projectId)
+    });
+  } catch (error: any) {
+    addLog('error', `[AUTO-LOOP] Falha no ciclo: ${error.message}`);
+  } finally {
+    autopilotRunning = false;
+    continuousAutoBusy = false;
+  }
+}
+
+function scheduleNextAutoCycle() {
+  if (!continuousAutoRunning) return;
+  const intervalMs = parseInt(process.env.AUTO_LOOP_INTERVAL_MS || '60000', 10);
+  continuousAutoTimer = setTimeout(async () => {
+    await runContinuousAutoCycle();
+    scheduleNextAutoCycle();
+  }, intervalMs);
+}
+
+function startContinuousAutoLoop() {
+  if (continuousAutoRunning) return;
+
+  continuousAutoRunning = true;
+  const intervalMs = parseInt(process.env.AUTO_LOOP_INTERVAL_MS || '60000', 10);
+  addLog('success', `[AUTO-LOOP] Modo automático ATIVO — ciclo a cada ${intervalMs / 1000}s (varredura + envio; próximo ciclo só após o anterior terminar).`);
+
+  void (async () => {
+    await runContinuousAutoCycle();
+    scheduleNextAutoCycle();
+  })();
+}
+
+function stopContinuousAutoLoop() {
+  if (!continuousAutoRunning) return;
+
+  continuousAutoRunning = false;
+  if (continuousAutoTimer) {
+    clearTimeout(continuousAutoTimer);
+    continuousAutoTimer = null;
+  }
+  addLog('info', '[AUTO-LOOP] Modo automático DESATIVADO.');
+}
+
+app.post('/api/auto-loop/start', (_req, res) => {
+  if (continuousAutoRunning) {
+    return res.status(429).json({ error: 'Modo automático já está ativo.' });
+  }
+
+  startContinuousAutoLoop();
+  res.json({ success: true, running: true, intervalMs: parseInt(process.env.AUTO_LOOP_INTERVAL_MS || '60000', 10) });
+});
+
+app.post('/api/auto-loop/stop', (_req, res) => {
+  stopContinuousAutoLoop();
+  res.json({ success: true, running: false });
+});
+
+app.get('/api/auto-loop/status', (_req, res) => {
+  res.json({
+    running: continuousAutoRunning,
+    busy: continuousAutoBusy,
+    intervalMs: parseInt(process.env.AUTO_LOOP_INTERVAL_MS || '60000', 10)
+  });
+});
+
+// Autopilot: "seen" com menos de AUTOPILOT_MAX_BIDS propostas → gerar → fila → enviar com pausas
 app.post('/api/autopilot/run', (req, res) => {
   if (autopilotRunning) {
     return res.status(429).json({ error: 'Autopilot já em execução. Acompanhe os logs.' });
@@ -697,12 +884,7 @@ app.post('/api/autopilot/run', (req, res) => {
       await runAutopilotBatch({
         batchSize,
         generateProject: (projectId) => generateAISingleProject(projectId),
-        getEligibleProjects: () => {
-          const db = readDB();
-          return getPublicProjects(db.projects)
-            .filter((p) => p.status === ProjectStatus.SEEN)
-            .map((p) => ({ id: p.id, title: p.title }));
-        },
+        getEligibleProjects: getAutopilotEligibleProjects,
         log: (type, message, projectId) => addLog(type, message, projectId)
       });
     } catch (error: any) {
@@ -717,9 +899,29 @@ app.get('/api/autopilot/status', (_req, res) => {
   res.json({ running: autopilotRunning });
 });
 
+// Persiste dados pendentes ao encerrar o processo.
+function flushAllPending() {
+  if (logsWriteTimer) {
+    clearTimeout(logsWriteTimer);
+    logsWriteTimer = null;
+  }
+  flushLogs();
+}
+
+process.on('SIGINT', () => {
+  flushAllPending();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  flushAllPending();
+  process.exit(0);
+});
+
 // Serve Frontend SPA
 // Vite middleware for development
 async function startServer() {
+  loadLogs();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -734,7 +936,7 @@ async function startServer() {
     });
   }
 
-  // Bind exclusively to Port 3000 on host 0.0.0.0
+  // Bind on configurable port (default 3001) on host 0.0.0.0
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[SERVER] 99freelas-sniper executando em http://localhost:${PORT}`);
     startAutoScrapeLoop();

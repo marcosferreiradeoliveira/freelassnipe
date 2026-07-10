@@ -41,7 +41,7 @@ export async function runAutopilotBatch(options: AutopilotOptions): Promise<Auto
   const targets = options.getEligibleProjects().slice(0, batchSize);
 
   if (targets.length === 0) {
-    log('warning', '[AUTOPILOT] Nenhum projeto novo ("seen") disponível. Rode uma varredura primeiro.');
+    log('warning', '[AUTOPILOT] Nenhum projeto elegível (status "seen" com menos propostas que o limite). Rode uma varredura ou aguarde novos projetos.');
     return {
       selected: 0,
       generated: 0,

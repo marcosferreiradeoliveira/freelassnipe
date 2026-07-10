@@ -10,7 +10,8 @@
     "autoSubmit": false,
     "maxProposalsPerDay": 10,
     "blacklistKeywords": [],
-    "whitelistKeywords": []
+    "whitelistKeywords": [],
+    "whitelistEnabled": true
   },
   "logs": []
 }
