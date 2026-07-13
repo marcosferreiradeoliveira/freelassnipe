@@ -24,6 +24,7 @@ export interface Project {
   suggestedPrice?: number;
   suggestedTime?: number; // In days
   timestamp: string; // ISO String
+  language?: 'pt' | 'es' | 'en';
   isExclusive?: boolean; // Projeto premium/exclusivo no 99freelas
 }
 

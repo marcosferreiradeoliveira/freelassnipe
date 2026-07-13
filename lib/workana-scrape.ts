@@ -1,5 +1,6 @@
 import { Project, ProjectStatus } from '../src/types';
 import { buildJobsListUrl, buildJobUrl, slugToProjectId } from './platform-config.ts';
+import { detectJobLanguage } from './job-language.ts';
 
 const SCRAPE_FETCH_HEADERS = {
   'User-Agent':
@@ -89,17 +90,19 @@ export async function fetchWorkanaJobsPageHtml(page: number): Promise<string> {
 
 export function workanaJobToProject(job: WorkanaJobResult): Project {
   const title = extractTitleFromHtml(job.title || '');
+  const description = decodeHtmlEntities(job.description || '');
 
   return {
     id: slugToProjectId(job.slug),
     title,
-    description: decodeHtmlEntities(job.description || ''),
+    description,
     skills: (job.skills || []).map((s) => s.anchorText).filter(Boolean),
     budget: job.budget || 'A combinar',
     bidsCount: parseBidsCount(job.totalBids || '0'),
     url: buildJobUrl(job.slug),
     status: ProjectStatus.SEEN,
     timestamp: new Date().toISOString(),
+    language: detectJobLanguage(title, description, job.slug),
     isExclusive: Boolean(job.isInvite)
   };
 }

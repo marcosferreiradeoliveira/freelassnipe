@@ -11,7 +11,7 @@ export const PLATFORM = {
   profileDir: process.env.PLAYWRIGHT_USER_DATA_DIR || '.workana-profile',
   sessionCookieNames: ['workana_session', 'appcookie[wldh]'] as const,
   scrapeCategory: process.env.WORKANA_CATEGORY || 'it-programming',
-  scrapeLanguage: process.env.WORKANA_LANGUAGE || 'pt',
+  scrapeLanguage: process.env.WORKANA_LANGUAGE || 'xx',
   scrapePage: parseInt(process.env.SCRAPE_START_PAGE || '1', 10)
 };
 

@@ -19,6 +19,7 @@ import {
 } from './lib/workana-scrape.ts';
 import { Project, ProjectStatus, SystemLog, SystemConfig } from './src/types';
 import { formatBudgetHint, normalizeSuggestedPrice } from './lib/budget-utils.ts';
+import { getLanguageLabel, getProposalLanguageInstruction, resolveProjectLanguage } from './lib/job-language.ts';
 
 dotenv.config();
 
@@ -526,6 +527,12 @@ async function generateAISingleProject(projectId: string): Promise<Project> {
 
   addLog('info', `Enviando briefing de #${projectId} para análise do Gemini (${geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite'})...`, projectId);
 
+  const jobLanguage = resolveProjectLanguage(project);
+  if (!project.language) {
+    project.language = jobLanguage;
+    writeDB(db);
+  }
+
   try {
     const ai = new GoogleGenAI({
       apiKey: activeApiKey,
@@ -544,6 +551,7 @@ TÍTULO DO PROJETO: "${project.title}"
 ORÇAMENTO INFORMADO: "${project.budget}"
 ${formatBudgetHint(project.budget)}
 HABILIDADES EXIGIDAS: ${project.skills.join(', ')}
+IDIOMA DETECTADO DO PROJETO: ${getLanguageLabel(jobLanguage)}
 DESCRIÇÃO COMPLETA DO CLIENTE:
 """
 ${project.description}
@@ -555,7 +563,7 @@ Instruções para a Proposta (proposal):
 3. Demonstre competência listando brevemente as tecnologias ideais (ex: Playwright/Puppeteer para automação web).
 4. No FINAL da proposta, inclua 1-2 frases curtas oferecendo uma amostra grátis bem pequena e específica ao projeto (ex.: mini diagnóstico, esboço de fluxo, revisão rápida de 15 min ou prova de conceito enxuta). Deve parecer um gesto de confiança — não prometa trabalho grátis ilimitado.
 5. Sugira preço (suggestedPrice) em USD COMPETITIVO e abaixo da média: use o mínimo da faixa ou até ~20% acima dele. Nunca sugira valores altos ou perto do teto do orçamento.
-6. Use a mesma língua do briefing (normalmente português do Brasil).
+6. ${getProposalLanguageInstruction(jobLanguage)} Não misture idiomas.
 
 Retorne estritamente em JSON:
 {
@@ -571,14 +579,14 @@ Retorne estritamente em JSON:
       model: activeModel,
       contents: promptText,
       config: {
-        systemInstruction: "Aja como um freelancer especialista no Workana. Propostas diretas, preço competitivo (faixa baixa) e sempre com uma amostra grátis pequena e concreta no final.",
+        systemInstruction: `Aja como um freelancer especialista no Workana. Propostas diretas, preço competitivo (faixa baixa), amostra grátis pequena no final, sempre em ${getLanguageLabel(jobLanguage)}.`,
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             proposal: {
               type: Type.STRING,
-              description: "Carta de apresentação em parágrafos curtos, terminando com oferta de amostra grátis pequena (1-2 frases)."
+              description: `Carta de apresentação em parágrafos curtos, em ${getLanguageLabel(jobLanguage)}, terminando com oferta de amostra grátis pequena (1-2 frases).`
             },
             suggestedPrice: {
               type: Type.NUMBER,
@@ -606,6 +614,7 @@ Retorne estritamente em JSON:
       postDb.projects[projIndex].generatedProposal = result.proposal;
       postDb.projects[projIndex].suggestedPrice = normalizedPrice.price;
       postDb.projects[projIndex].suggestedTime = result.suggestedTime;
+      postDb.projects[projIndex].language = jobLanguage;
       postDb.projects[projIndex].status = ProjectStatus.PENDING_REVIEW;
       
       writeDB(postDb);
