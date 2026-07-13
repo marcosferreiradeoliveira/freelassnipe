@@ -197,6 +197,9 @@ interface ScrapeResult {
 }
 
 let scrapeInProgress = false;
+let bgPipelineRunning = false;
+let bgGenerationRunning = false;
+let bgSubmitRunning = false;
 
 async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeResult> {
   const quiet = options.quiet === true;
@@ -303,7 +306,7 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
     }
 
     if (db.config.autoSubmit && addedCount > 0) {
-      triggerBgAutoGenerations();
+      void runAutoPipeline();
     }
 
     return {
@@ -376,22 +379,80 @@ async function handleWebScrape(req: any, res: any) {
   });
 }
 
-// Background generator runner for automated pilot
-async function triggerBgAutoGenerations() {
+async function triggerBgAutoGenerations(): Promise<void> {
+  if (bgGenerationRunning) return;
+
   const db = readDB();
-  const backlog = db.projects.filter(p => p.status === ProjectStatus.GENERATING || (db.config.autoSubmit && p.status === ProjectStatus.SEEN));
-  
+  if (!db.config.autoSubmit) return;
+
+  const backlog = db.projects.filter(
+    (p) => p.status === ProjectStatus.GENERATING || p.status === ProjectStatus.SEEN
+  );
   if (backlog.length === 0) return;
-  
-  addLog('info', `[AUTOMÇÃO INTEGRADA] Executando geração em massa com Gemini para ${backlog.length} oportunidades.`);
-  
-  for (const project of backlog) {
-    try {
-      await generateAISingleProject(project.id);
-    } catch (e: any) {
-      console.error(`Bg generic failed for #${project.id}`, e);
+
+  bgGenerationRunning = true;
+  try {
+    addLog('info', `[AUTO] Gerando ${backlog.length} proposta(s) com Gemini...`);
+    for (const project of backlog) {
+      try {
+        await generateAISingleProject(project.id);
+      } catch (e: any) {
+        console.error(`Bg generation failed for #${project.id}`, e);
+      }
     }
+  } finally {
+    bgGenerationRunning = false;
   }
+}
+
+async function triggerBgAutoSubmit(): Promise<void> {
+  if (bgSubmitRunning) return;
+
+  const db = readDB();
+  if (!db.config.autoSubmit) return;
+
+  const pending = db.projects.filter(
+    (p) => p.status === ProjectStatus.PENDING_REVIEW && Boolean(p.generatedProposal?.trim())
+  );
+  if (pending.length === 0) return;
+
+  bgSubmitRunning = true;
+  try {
+    addLog('info', `[AUTO] Enviando ${pending.length} proposta(s) prontas...`);
+    await runSubmitWorker({
+      forceSubmit: true,
+      log: (type, message, projectId) => addLog(type, message, projectId),
+      delayBetweenSubmitsMs: parseInt(process.env.AUTOPILOT_SUBMIT_DELAY_MS || '45000', 10),
+      delayJitterMs: parseInt(process.env.AUTOPILOT_SUBMIT_JITTER_MS || '45000', 10)
+    });
+  } finally {
+    bgSubmitRunning = false;
+  }
+}
+
+async function runAutoPipeline(): Promise<void> {
+  if (bgPipelineRunning) return;
+
+  const db = readDB();
+  if (!db.config.autoSubmit) return;
+
+  bgPipelineRunning = true;
+  try {
+    await triggerBgAutoGenerations();
+    await triggerBgAutoSubmit();
+  } finally {
+    bgPipelineRunning = false;
+  }
+}
+
+function startAutoPipelineLoop() {
+  const intervalMs = parseInt(process.env.AUTO_PIPELINE_INTERVAL_MS || '20000', 10);
+
+  setInterval(() => {
+    runAutoPipeline().catch((err) => {
+      addLog('error', `[AUTO] Falha no pipeline automático: ${err.message}`);
+    });
+  }, intervalMs);
 }
 
 // Common core implementation of AISingleProject for API and backgrounds
@@ -600,6 +661,38 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+app.get('/api/auto-mode/status', (_req, res) => {
+  const db = readDB();
+  res.json({
+    enabled: db.config.autoSubmit === true,
+    pipelineRunning: bgPipelineRunning,
+    generating: bgGenerationRunning,
+    submitting: bgSubmitRunning,
+    scraping: scrapeInProgress,
+    backlog: {
+      seen: db.projects.filter((p) => p.status === ProjectStatus.SEEN).length,
+      generating: db.projects.filter((p) => p.status === ProjectStatus.GENERATING).length,
+      pending: db.projects.filter((p) => p.status === ProjectStatus.PENDING_REVIEW).length
+    }
+  });
+});
+
+app.post('/api/auto-mode/toggle', (req, res) => {
+  const db = readDB();
+  const enabled = typeof req.body?.enabled === 'boolean' ? req.body.enabled : !db.config.autoSubmit;
+  db.config.autoSubmit = enabled;
+  writeDB(db);
+
+  if (enabled) {
+    addLog('info', '[AUTO] Modo automático ATIVADO — varredura contínua, geração IA e envio de propostas.');
+    void runAutoPipeline();
+  } else {
+    addLog('info', '[AUTO] Modo automático DESATIVADO.');
+  }
+
+  res.json({ enabled: db.config.autoSubmit });
+});
+
 let autopilotRunning = false;
 
 // Autopilot: 10 primeiros "seen" → gerar → fila → enviar com pausas
@@ -664,6 +757,7 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[SERVER] workana-sniper executando em http://localhost:${PORT}`);
     startAutoScrapeLoop();
+    startAutoPipelineLoop();
   });
 }
 

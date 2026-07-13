@@ -50,6 +50,15 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isRunningWorker, setIsRunningWorker] = useState(false);
   const [isRunningAutopilot, setIsRunningAutopilot] = useState(false);
+  const [isTogglingAutoMode, setIsTogglingAutoMode] = useState(false);
+  const [autoModeStatus, setAutoModeStatus] = useState({
+    enabled: false,
+    pipelineRunning: false,
+    generating: false,
+    submitting: false,
+    scraping: false,
+    backlog: { seen: 0, generating: 0, pending: 0 }
+  });
   const [isOpeningLogin, setIsOpeningLogin] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -70,10 +79,24 @@ export default function App() {
     // Poll API for updates without triggering full page reloads
     const interval = setInterval(() => {
       silentPoll();
+      fetchAutoModeStatus();
     }, 8000);
     
+    fetchAutoModeStatus();
     return () => clearInterval(interval);
   }, []);
+
+  const fetchAutoModeStatus = async () => {
+    try {
+      const res = await fetch('/api/auto-mode/status');
+      if (res.ok) {
+        const data = await res.json();
+        setAutoModeStatus(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch auto mode status', e);
+    }
+  };
 
   // Whenever selected project changes, dump its proposal variables inside textfields
   useEffect(() => {
@@ -283,6 +306,27 @@ export default function App() {
     }
   };
 
+  const handleToggleAutoMode = async () => {
+    setIsTogglingAutoMode(true);
+    try {
+      const res = await fetch('/api/auto-mode/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !autoModeStatus.enabled })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setConfig((prev) => (prev ? { ...prev, autoSubmit: data.enabled } : prev));
+        await fetchAutoModeStatus();
+        await fetchLogs();
+      }
+    } catch (e) {
+      console.error('Failed to toggle auto mode', e);
+    } finally {
+      setIsTogglingAutoMode(false);
+    }
+  };
+
   const handleRunAutopilot = async () => {
     if (!confirm('Disparar autopilot nas 10 primeiras oportunidades "vistas"?\n\nGera propostas com IA, coloca na fila e envia com pausas anti-detecção (~45-90s entre envios).')) {
       return;
@@ -411,10 +455,38 @@ export default function App() {
               Workana Sniper Automation
             </h1>
             <p className="text-xs text-slate-400 flex items-center gap-1.5 mt-0.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-ping"></span>
-              Pilotagem IA de Lance Contínuo Ativo
+              <span className={`w-2 h-2 rounded-full inline-block ${autoModeStatus.enabled ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`}></span>
+              {autoModeStatus.enabled
+                ? autoModeStatus.submitting
+                  ? 'Modo automático — enviando propostas...'
+                  : autoModeStatus.generating
+                    ? 'Modo automático — gerando com IA...'
+                    : autoModeStatus.scraping
+                      ? 'Modo automático — varrendo Workana...'
+                      : 'Modo automático ATIVO — scrape + IA + envio'
+                : 'Modo manual — ative o Sniper Automático no topo'}
             </p>
           </div>
+        </div>
+
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <button
+            type="button"
+            onClick={handleToggleAutoMode}
+            disabled={isTogglingAutoMode}
+            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl font-black text-xs flex items-center justify-center gap-2 shadow-lg transition-all ${
+              autoModeStatus.enabled
+                ? 'bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 ring-2 ring-emerald-400/40 animate-pulse'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+            }`}
+          >
+            {isTogglingAutoMode ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Zap className={`w-4 h-4 ${autoModeStatus.enabled ? 'fill-current' : ''}`} />
+            )}
+            {autoModeStatus.enabled ? 'Sniper Automático ON' : 'Sniper Automático'}
+          </button>
         </div>
 
         {/* TOP STATUS COUNTERS */}
@@ -468,12 +540,13 @@ export default function App() {
               <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
                 <div className="flex items-center justify-between">
                   <div>
-                    <label className="text-xs font-semibold text-slate-200 block">Modo Operacional AI</label>
-                    <span className="text-[10px] text-slate-400">Ativa o envio 100% autônomo</span>
+                    <label className="text-xs font-semibold text-slate-200 block">Modo Automático Completo</label>
+                    <span className="text-[10px] text-slate-400">Varre, gera com IA e envia propostas sozinho</span>
                   </div>
                   <button
                     type="button"
-                    onClick={() => setConfig({ ...config, autoSubmit: !config.autoSubmit })}
+                    onClick={handleToggleAutoMode}
+                    disabled={isTogglingAutoMode}
                     className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${config.autoSubmit ? 'bg-cyan-500' : 'bg-slate-700'}`}
                   >
                     <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${config.autoSubmit ? 'translate-x-5' : 'translate-x-0'}`} />
@@ -481,7 +554,7 @@ export default function App() {
                 </div>
                 <div className="mt-2 text-center">
                   <span className={`text-[10px] px-2 py-0.5 font-bold rounded ${config.autoSubmit ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-blue-950 text-blue-400 border border-blue-900'}`}>
-                    {config.autoSubmit ? 'PILOTO AUTOMÁTICO ENTRADA + LANCE ATIVO' : 'MODO MANUAL (APENAS MODELAGEM IA)'}
+                    {config.autoSubmit ? 'SCRAPE + IA + ENVIO AUTOMÁTICOS' : 'MODO MANUAL (APENAS MODELAGEM IA)'}
                   </span>
                 </div>
               </div>
@@ -734,6 +807,16 @@ export default function App() {
               Scrape Workana
             </button>
           </div>
+
+          {autoModeStatus.enabled && (
+            <div className="mb-3 px-3 py-2 rounded-lg border border-emerald-900/60 bg-emerald-950/20 text-[10px] text-emerald-300 flex items-center gap-2">
+              <Zap className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Automático ativo: novos projetos passam por IA e envio (~45–90s entre lances).
+                {autoModeStatus.backlog.pending > 0 && ` Fila: ${autoModeStatus.backlog.pending} pronta(s).`}
+              </span>
+            </div>
+          )}
 
           {/* Search filters panel */}
           <div className="flex flex-col sm:flex-row gap-2 mb-3 bg-slate-950 p-2 rounded-lg border border-slate-800/80">
