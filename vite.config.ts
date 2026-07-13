@@ -12,7 +12,9 @@ export default defineConfig(() => {
       },
     },
     server: {
-      hmr: process.env.DISABLE_HMR !== 'true',
+      hmr: process.env.DISABLE_HMR !== 'true'
+        ? { port: parseInt(process.env.HMR_PORT || '24679', 10) }
+        : false,
       watch: process.env.DISABLE_HMR === 'true' ? null : {
         ignored: ['**/db.json'],
       },

@@ -46,6 +46,7 @@ export interface SystemConfig {
   playwrightHeadless: boolean;
   autoSubmit: boolean;
   maxProposalsPerDay: number;
+  useKeywordFilters: boolean;
   blacklistKeywords: string[];
   whitelistKeywords: string[];
 }

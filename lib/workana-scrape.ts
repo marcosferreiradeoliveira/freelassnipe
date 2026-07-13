@@ -51,10 +51,7 @@ function decodeResultsInitialsPayload(raw: string): { results: WorkanaJobResult[
     .replace(/&amp;/g, '&')
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/\\u003C/g, '<')
-    .replace(/\\u003E/g, '>')
-    .replace(/\\u0022/g, '"');
+    .replace(/&gt;/g, '>');
 
   return JSON.parse(jsonText);
 }

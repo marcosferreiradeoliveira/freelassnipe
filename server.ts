@@ -18,11 +18,13 @@ import {
   workanaJobToProject
 } from './lib/workana-scrape.ts';
 import { Project, ProjectStatus, SystemLog, SystemConfig } from './src/types';
+import { formatBudgetHint, normalizeSuggestedPrice } from './lib/budget-utils.ts';
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3002', 10);
+const HMR_PORT = parseInt(process.env.HMR_PORT || '24679', 10);
 const DB_FILE = path.join(process.cwd(), 'db.json');
 
 app.use(express.json());
@@ -45,6 +47,7 @@ const DEFAULT_CONFIG: SystemConfig = {
   playwrightHeadless: process.env.PLAYWRIGHT_HEADLESS === 'true',
   autoSubmit: process.env.AUTO_SUBMIT === 'true',
   maxProposalsPerDay: parseInt(process.env.MAX_PROPOSALS_PER_DAY || '10', 10),
+  useKeywordFilters: process.env.USE_KEYWORD_FILTERS !== 'false',
   blacklistKeywords: ['design', 'logo', 'video', 'copywriter', 'tradutor', 'artes', 'redigi', 'escrever'],
   whitelistKeywords: ['node', 'python', 'script', 'automação', 'automacao', 'bot', 'scrapper', 'raspar', 'ia', 'gemini', 'chatgpt', 'crawler', 'api', 'backend', 'vps', 'dados', 'integrar', 'integração']
 };
@@ -219,7 +222,7 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
     }
 
     const db = readDB();
-    const { whitelistKeywords, blacklistKeywords } = db.config;
+    const { whitelistKeywords, blacklistKeywords, useKeywordFilters } = db.config;
     const targetUrl = buildJobsListUrl(SCRAPE_START_PAGE);
 
     if (!quiet) {
@@ -256,7 +259,7 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
       const titleLower = project.title.toLowerCase();
       const descLower = project.description.toLowerCase();
 
-      const hitsBlacklist = blacklistKeywords.some((kw: string) =>
+      const hitsBlacklist = useKeywordFilters !== false && blacklistKeywords.some((kw: string) =>
         titleLower.includes(kw.toLowerCase()) || descLower.includes(kw.toLowerCase())
       );
 
@@ -272,7 +275,7 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
         continue;
       }
 
-      if (whitelistKeywords.length > 0 && !hitsWhitelist) {
+      if (useKeywordFilters !== false && whitelistKeywords.length > 0 && !hitsWhitelist) {
         if (!quiet) {
           addLog('warning', `Filtro ativo: Projeto [${project.title.substring(0, 30)}...] ignorado por não conter termos técnicos da whitelist.`);
         }
@@ -409,17 +412,19 @@ async function generateAISingleProject(projectId: string): Promise<Project> {
   // Verify technical/automation scope before spending Gemini tokens
   const titleLower = project.title.toLowerCase();
   const descLower = project.description.toLowerCase();
-  const { whitelistKeywords, blacklistKeywords, geminiApiKey, geminiModel } = db.config;
+  const { whitelistKeywords, blacklistKeywords, geminiApiKey, geminiModel, useKeywordFilters } = db.config;
 
-  const passesScope = whitelistKeywords.some((kw: string) => 
-    titleLower.includes(kw.toLowerCase()) || descLower.includes(kw.toLowerCase())
-  );
-  
-  if (!passesScope) {
-    project.status = ProjectStatus.FAILED;
-    writeDB(db);
-    addLog('warning', `[FILTRO IA COM ESCASSEZ] Projeto #${projectId} abortado antes de chamar o Gemini: Fora de escopo tech/automação.`, projectId);
-    throw new Error('Projeto abortado: Sem correspondência de escopo técnico.');
+  if (useKeywordFilters !== false) {
+    const passesScope = whitelistKeywords.some((kw: string) => 
+      titleLower.includes(kw.toLowerCase()) || descLower.includes(kw.toLowerCase())
+    );
+    
+    if (!passesScope) {
+      project.status = ProjectStatus.FAILED;
+      writeDB(db);
+      addLog('warning', `[FILTRO IA COM ESCASSEZ] Projeto #${projectId} abortado antes de chamar o Gemini: Fora de escopo tech/automação.`, projectId);
+      throw new Error('Projeto abortado: Sem correspondência de escopo técnico.');
+    }
   }
 
   // Update status to generating
@@ -452,6 +457,7 @@ Analise a seguinte oportunidade listada no Workana e crie uma carta de apresenta
 
 TÍTULO DO PROJETO: "${project.title}"
 ORÇAMENTO INFORMADO: "${project.budget}"
+${formatBudgetHint(project.budget)}
 HABILIDADES EXIGIDAS: ${project.skills.join(', ')}
 DESCRIÇÃO COMPLETA DO CLIENTE:
 """
@@ -462,7 +468,7 @@ Instruções para a Proposta (proposal):
 1. Aja como freelancer profissional que entende as dores específicas do projeto.
 2. Seja DIRETO — sem introduções genéricas ou floreios de marketing. Máximo de 3-4 parágrafos curtos.
 3. Demonstre competência listando brevemente as tecnologias ideais (ex: Playwright/Puppeteer para automação web).
-4. Sugira preço (suggestedPrice) em USD compatível com o orçamento do cliente e prazo em dias (suggestedTime).
+4. Sugira preço (suggestedPrice) em USD compatível com o orçamento do cliente. O valor DEVE ser >= ao mínimo da faixa informada (ou USD/h mínimo em projetos por hora). Prefira um valor dentro da faixa, próximo ao meio ou topo quando fizer sentido.
 5. Use a mesma língua do briefing (normalmente português do Brasil).
 
 Retorne estritamente em JSON:
@@ -504,6 +510,7 @@ Retorne estritamente em JSON:
 
     const responseText = response.text || '';
     const result = JSON.parse(responseText.trim());
+    const normalizedPrice = normalizeSuggestedPrice(result.suggestedPrice, project.budget);
 
     // Refresh DB and apply results to prevent overwritten states
     const postDb = readDB();
@@ -511,12 +518,15 @@ Retorne estritamente em JSON:
     
     if (projIndex !== -1) {
       postDb.projects[projIndex].generatedProposal = result.proposal;
-      postDb.projects[projIndex].suggestedPrice = result.suggestedPrice;
+      postDb.projects[projIndex].suggestedPrice = normalizedPrice.price;
       postDb.projects[projIndex].suggestedTime = result.suggestedTime;
       postDb.projects[projIndex].status = ProjectStatus.PENDING_REVIEW;
       
       writeDB(postDb);
-      addLog('success', `Proposta Sniper para #${projectId} gerada com sucesso! Preço sugerido: $${result.suggestedPrice} USD, Prazo: ${result.suggestedTime} dias.`, projectId);
+      if (normalizedPrice.adjusted && normalizedPrice.reason) {
+        addLog('warning', `[PREÇO] ${normalizedPrice.reason}`, projectId);
+      }
+      addLog('success', `Proposta Sniper para #${projectId} gerada com sucesso! Preço sugerido: $${normalizedPrice.price} USD, Prazo: ${result.suggestedTime} dias.`, projectId);
       return postDb.projects[projIndex];
     } else {
       throw new Error("Projeto desapareceu durante processamento Gemini.");
@@ -636,7 +646,10 @@ app.get('/api/autopilot/status', (_req, res) => {
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { port: HMR_PORT },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -648,7 +661,6 @@ async function startServer() {
     });
   }
 
-  // Bind exclusively to Port 3000 on host 0.0.0.0
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[SERVER] workana-sniper executando em http://localhost:${PORT}`);
     startAutoScrapeLoop();

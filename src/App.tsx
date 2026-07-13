@@ -605,8 +605,30 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Keyword Filters Toggle */}
+              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-200 block">Filtros Whitelist / Blacklist</label>
+                    <span className="text-[10px] text-slate-400">Filtra projetos por palavras-chave na varredura e na IA</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setConfig({ ...config, useKeywordFilters: !config.useKeywordFilters })}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${config.useKeywordFilters ? 'bg-cyan-500' : 'bg-slate-700'}`}
+                  >
+                    <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${config.useKeywordFilters ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+                <div className="mt-2 text-center">
+                  <span className={`text-[10px] px-2 py-0.5 font-bold rounded ${config.useKeywordFilters ? 'bg-cyan-950 text-cyan-400 border border-cyan-900' : 'bg-slate-900 text-slate-400 border border-slate-700'}`}>
+                    {config.useKeywordFilters ? 'FILTROS ATIVOS' : 'FILTROS DESATIVADOS — TODOS OS PROJETOS PASSAM'}
+                  </span>
+                </div>
+              </div>
+
               {/* Whitelist Keywords */}
-              <div className="border-t border-slate-800 pt-3">
+              <div className={`border-t border-slate-800 pt-3 ${config.useKeywordFilters ? '' : 'opacity-50 pointer-events-none'}`}>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">Palavras Whitelist (Filtro)</label>
                 <div className="flex gap-1.5 mb-2">
                   <input
@@ -637,7 +659,7 @@ export default function App() {
               </div>
 
               {/* Blacklist Keywords */}
-              <div className="border-t border-slate-800 pt-3">
+              <div className={`border-t border-slate-800 pt-3 ${config.useKeywordFilters ? '' : 'opacity-50 pointer-events-none'}`}>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">Palavras Blacklist (Auto-Rejeição)</label>
                 <div className="flex gap-1.5 mb-2">
                   <input
@@ -743,7 +765,12 @@ export default function App() {
           </div>
 
           {/* Projects lists */}
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1 max-h-[calc(10*9rem+2.25rem)]">
+            {filteredProjects.length > 10 && (
+              <p className="text-[10px] text-slate-500 sticky top-0 z-10 bg-slate-900/95 backdrop-blur px-1 py-1 border-b border-slate-800/80">
+                {filteredProjects.length} oportunidades — role para ver todas
+              </p>
+            )}
             {filteredProjects.map(project => {
               const isSelected = project.id === selectedProjectId;
               return (

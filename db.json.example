@@ -9,6 +9,7 @@
     "playwrightHeadless": true,
     "autoSubmit": false,
     "maxProposalsPerDay": 10,
+    "useKeywordFilters": true,
     "blacklistKeywords": [],
     "whitelistKeywords": []
   },

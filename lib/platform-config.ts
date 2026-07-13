@@ -9,7 +9,7 @@ export const PLATFORM = {
   loginUrl: 'https://www.workana.com/login',
   cookieDomain: 'www.workana.com',
   profileDir: process.env.PLAYWRIGHT_USER_DATA_DIR || '.workana-profile',
-  sessionCookieNames: ['workana_session'] as const,
+  sessionCookieNames: ['workana_session', 'appcookie[wldh]'] as const,
   scrapeCategory: process.env.WORKANA_CATEGORY || 'it-programming',
   scrapeLanguage: process.env.WORKANA_LANGUAGE || 'pt',
   scrapePage: parseInt(process.env.SCRAPE_START_PAGE || '1', 10)

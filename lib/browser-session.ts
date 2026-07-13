@@ -8,6 +8,12 @@ dotenv.config();
 const DB_FILE = path.join(process.cwd(), 'db.json');
 
 export const SESSION_COOKIE_NAMES = PLATFORM.sessionCookieNames;
+const AUTH_COOKIE_NAMES = new Set([
+  ...SESSION_COOKIE_NAMES,
+  'appcookie[activeSession]',
+  'appcookie[wd]',
+  'dcstcookieii'
+]);
 
 type LogFn = (type: 'info' | 'warning' | 'error' | 'success', message: string) => void;
 
@@ -32,17 +38,16 @@ export function usePersistentProfile(): boolean {
 export function buildSessionCookieString(
   cookies: Array<{ name: string; value: string }>
 ): string {
-  const required = SESSION_COOKIE_NAMES.map((name) => cookies.find((c) => c.name === name))
-    .filter(Boolean)
-    .map((c) => `${c!.name}=${c!.value}`);
+  const authenticationCookies = cookies
+    .filter((cookie) => AUTH_COOKIE_NAMES.has(cookie.name) && cookie.value)
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ');
 
-  if (required.length > 0) {
-    return required.join('; ');
-  }
+  if (authenticationCookies) return authenticationCookies;
 
   return cookies
-    .filter((c) => c.name && c.value)
-    .map((c) => `${c.name}=${c.value}`)
+    .filter((cookie) => cookie.name && cookie.value)
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
     .join('; ');
 }
 
@@ -157,8 +162,8 @@ export async function syncSessionToDatabase(
   const cookies = await context.cookies(PLATFORM.baseUrl);
   const sessionString = buildSessionCookieString(cookies);
 
-  if (!sessionString.includes('workana_session=')) {
-    log?.('warning', 'Perfil ativo, mas workana_session não encontrado.');
+  if (!SESSION_COOKIE_NAMES.every((name) => sessionString.includes(`${name}=`))) {
+    log?.('warning', 'Perfil ativo, mas os cookies de autenticação do Workana estão incompletos.');
     return false;
   }
 
@@ -171,12 +176,26 @@ export async function syncSessionToDatabase(
 
 export async function navigateAndCheckSession(page: any, context?: any): Promise<boolean> {
   await page.goto(PLATFORM.sessionCheckUrl, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000
+    waitUntil: 'networkidle',
+    timeout: 45000
+  }).catch(async () => {
+    await page.goto(PLATFORM.sessionCheckUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
   });
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(2000);
 
   if (isLoginUrl(page.url())) {
+    return false;
+  }
+
+  const loginFormVisible = await page
+    .locator('input[name="email"], input#Email, input[name="password"], input#UserPassword')
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (loginFormVisible) {
     return false;
   }
 
@@ -185,6 +204,49 @@ export async function navigateAndCheckSession(page: any, context?: any): Promise
   }
 
   return true;
+}
+
+export type JobBidStatus =
+  | { ok: true }
+  | { ok: false; reason: 'not_logged_in' | 'project_not_found' | 'no_bid_button' };
+
+export async function getJobBidStatus(page: any, jobUrl: string): Promise<JobBidStatus> {
+  await page.goto(jobUrl, {
+    waitUntil: 'domcontentloaded',
+    timeout: 30000
+  });
+  await page.waitForTimeout(2000);
+
+  if (isLoginUrl(page.url())) {
+    return { ok: false, reason: 'not_logged_in' };
+  }
+
+  const notFound = await page
+    .locator('text=/projeto não encontrado|project not found|não encontrado/i')
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (notFound) {
+    return { ok: false, reason: 'project_not_found' };
+  }
+
+  const bidButton = page.locator('#bid_button').first();
+  if (!(await bidButton.isVisible().catch(() => false))) {
+    return { ok: false, reason: 'no_bid_button' };
+  }
+
+  const href = await bidButton.getAttribute('href').catch(() => null);
+  if (!href || href.includes('/signup') || href.includes('/login')) {
+    return { ok: false, reason: 'not_logged_in' };
+  }
+
+  return { ok: true };
+}
+
+/** @deprecated Use getJobBidStatus */
+export async function canSubmitProposalOnJob(page: any, jobUrl: string): Promise<boolean> {
+  const status = await getJobBidStatus(page, jobUrl);
+  return status.ok;
 }
 
 export async function ensureLoggedInWithProfile(
@@ -253,8 +315,8 @@ async function injectCookiesFromConfig(context: any, config: any, log?: LogFn): 
 
   if (!cookieString) return false;
 
-  if (!cookieString.includes('workana_session=')) {
-    write('error', 'Cookie incompleto. Copie workana_session (e dcstcookieii se houver) do DevTools.');
+  if (!SESSION_COOKIE_NAMES.every((name) => cookieString.includes(`${name}=`))) {
+    write('error', 'Cookie incompleto. Copie workana_session e appcookie[wldh] do DevTools.');
     return false;
   }
 
