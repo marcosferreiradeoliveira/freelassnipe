@@ -57,6 +57,7 @@ export default function App() {
     generating: false,
     submitting: false,
     scraping: false,
+    spacingSeconds: { generate: '2-6', submit: '45-90' },
     backlog: { seen: 0, generating: 0, pending: 0 }
   });
   const [isOpeningLogin, setIsOpeningLogin] = useState(false);
@@ -812,8 +813,9 @@ export default function App() {
             <div className="mb-3 px-3 py-2 rounded-lg border border-emerald-900/60 bg-emerald-950/20 text-[10px] text-emerald-300 flex items-center gap-2">
               <Zap className="w-3.5 h-3.5 shrink-0" />
               <span>
-                Automático ativo: novos projetos passam por IA e envio (~45–90s entre lances).
-                {autoModeStatus.backlog.pending > 0 && ` Fila: ${autoModeStatus.backlog.pending} pronta(s).`}
+                Automático ativo: 1 proposta por vez — envio espaçado de ~{autoModeStatus.spacingSeconds?.submit || '45-90'}s.
+                {(autoModeStatus.backlog.seen + autoModeStatus.backlog.pending + autoModeStatus.backlog.generating) > 0 &&
+                  ` Fila: ${autoModeStatus.backlog.seen + autoModeStatus.backlog.pending + autoModeStatus.backlog.generating}.`}
               </span>
             </div>
           )}

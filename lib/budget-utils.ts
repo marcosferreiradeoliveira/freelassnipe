@@ -52,35 +52,65 @@ export function parseBudgetRange(budget: string): BudgetRange {
   return { isHourly, raw };
 }
 
+const PRICE_DISCOUNT_FACTOR = Number.parseFloat(process.env.PRICE_DISCOUNT_FACTOR || '0.7');
+const BUDGET_LOW_QUARTILE = Number.parseFloat(process.env.PRICE_BUDGET_LOW_QUARTILE || '0.2');
+
+function competitiveCapUsd(range: BudgetRange): number | undefined {
+  if (!range.min) return undefined;
+  if (range.max && range.max > range.min) {
+    return Math.round(range.min + (range.max - range.min) * BUDGET_LOW_QUARTILE);
+  }
+  return Math.round(range.min * 1.15);
+}
+
 export function normalizeSuggestedPrice(
   suggestedPrice: number | undefined,
   budget: string
 ): { price?: number; adjusted: boolean; reason?: string } {
   const range = parseBudgetRange(budget);
+  const unit = range.isHourly ? 'USD/h' : 'USD';
+  const cap = competitiveCapUsd(range);
 
   if (!range.min) {
-    return { price: suggestedPrice, adjusted: false };
+    if (!suggestedPrice || suggestedPrice <= 0) {
+      return { price: suggestedPrice, adjusted: false };
+    }
+    const discounted = Math.max(1, Math.round(suggestedPrice * PRICE_DISCOUNT_FACTOR));
+    if (discounted === suggestedPrice) {
+      return { price: suggestedPrice, adjusted: false };
+    }
+    return {
+      price: discounted,
+      adjusted: true,
+      reason: `Preço ajustado para valor competitivo ($${discounted} ${unit}, −${Math.round((1 - PRICE_DISCOUNT_FACTOR) * 100)}%).`
+    };
   }
-
-  const unit = range.isHourly ? 'USD/h' : 'USD';
 
   if (!suggestedPrice || suggestedPrice <= 0) {
+    const fallback = cap ?? range.min;
     return {
-      price: range.min,
+      price: fallback,
       adjusted: true,
-      reason: `Preço ausente; usando mínimo da faixa (${range.min} ${unit}).`
+      reason: `Preço ausente; usando faixa baixa (${fallback} ${unit}).`
     };
   }
 
-  if (suggestedPrice < range.min) {
-    return {
-      price: range.min,
-      adjusted: true,
-      reason: `Preço $${suggestedPrice} abaixo do mínimo ($${range.min}); ajustado para ${range.min} ${unit}.`
-    };
+  let price = Math.round(suggestedPrice * PRICE_DISCOUNT_FACTOR);
+  if (cap !== undefined) {
+    price = Math.min(price, cap);
+  }
+  price = Math.max(range.min, price);
+
+  const adjusted = price !== suggestedPrice;
+  let reason: string | undefined;
+  if (adjusted) {
+    reason =
+      price < suggestedPrice
+        ? `Preço $${suggestedPrice} → $${price} ${unit} (competitivo, faixa baixa).`
+        : `Preço ajustado para mínimo da faixa (${price} ${unit}).`;
   }
 
-  return { price: suggestedPrice, adjusted: false };
+  return { price, adjusted, reason };
 }
 
 export function formatBudgetHint(budget: string): string {
@@ -89,8 +119,9 @@ export function formatBudgetHint(budget: string): string {
 
   const unit = range.isHourly ? 'USD/h' : 'USD';
   if (range.min && range.max && range.min !== range.max) {
-    return `Faixa: ${range.min} - ${range.max} ${unit}. Nunca sugira valor abaixo de ${range.min} ${unit}.`;
+    const lowTarget = Math.round(range.min + (range.max - range.min) * BUDGET_LOW_QUARTILE);
+    return `Faixa: ${range.min} - ${range.max} ${unit}. Sugira valor COMPETITIVO próximo ao mínimo (ideal: ${lowTarget} ${unit} ou até +15% acima do mínimo). Nunca acima de 30% da faixa.`;
   }
 
-  return `Valor mínimo: ${range.min} ${unit}.`;
+  return `Valor mínimo: ${range.min} ${unit}. Sugira preço competitivo, próximo ao mínimo (+10% a +15% no máximo).`;
 }
