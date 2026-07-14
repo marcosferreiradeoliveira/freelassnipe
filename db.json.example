@@ -8,7 +8,9 @@
     "freelasSessionCookie": "",
     "playwrightHeadless": true,
     "autoSubmit": false,
+    "autoReplyMessages": false,
     "maxProposalsPerDay": 10,
+    "repliedMessageIds": [],
     "useKeywordFilters": true,
     "blacklistKeywords": [],
     "whitelistKeywords": []

@@ -20,6 +20,7 @@ import {
 import { Project, ProjectStatus, SystemLog, SystemConfig } from './src/types';
 import { formatBudgetHint, normalizeSuggestedPrice } from './lib/budget-utils.ts';
 import { getLanguageLabel, getProposalLanguageInstruction, resolveProjectLanguage } from './lib/job-language.ts';
+import { runAutoReplyPass } from './lib/workana-messages.ts';
 
 dotenv.config();
 
@@ -47,8 +48,10 @@ const DEFAULT_CONFIG: SystemConfig = {
   freelasSessionCookie: process.env.FREELAS_SESSION_COOKIE || '',
   playwrightHeadless: process.env.PLAYWRIGHT_HEADLESS === 'true',
   autoSubmit: process.env.AUTO_SUBMIT === 'true',
+  autoReplyMessages: process.env.AUTO_REPLY_MESSAGES === 'true',
   maxProposalsPerDay: parseInt(process.env.MAX_PROPOSALS_PER_DAY || '10', 10),
   useKeywordFilters: process.env.USE_KEYWORD_FILTERS !== 'false',
+  repliedMessageIds: [],
   blacklistKeywords: ['design', 'logo', 'video', 'copywriter', 'tradutor', 'artes', 'redigi', 'escrever'],
   whitelistKeywords: ['node', 'python', 'script', 'automação', 'automacao', 'bot', 'scrapper', 'raspar', 'ia', 'gemini', 'chatgpt', 'crawler', 'api', 'backend', 'vps', 'dados', 'integrar', 'integração']
 };
@@ -480,6 +483,66 @@ function startAutoPipelineLoop() {
   }, intervalMs);
 }
 
+let bgChatReplyRunning = false;
+
+async function runAutoChatReply(): Promise<void> {
+  if (bgChatReplyRunning) return;
+
+  const db = readDB();
+  if (!db.config.autoReplyMessages) return;
+
+  const cookie = db.config.freelasSessionCookie;
+  const apiKey = db.config.geminiApiKey || process.env.GEMINI_API_KEY;
+  if (!cookie) {
+    addLog('warning', '[CHAT] Cookie de sessão ausente — não dá para ler a inbox.');
+    return;
+  }
+  if (!apiKey) {
+    addLog('warning', '[CHAT] GEMINI_API_KEY ausente — não dá para gerar respostas.');
+    return;
+  }
+
+  bgChatReplyRunning = true;
+  try {
+    const alreadyRepliedIds = new Set(db.config.repliedMessageIds || []);
+    const result = await runAutoReplyPass({
+      cookie,
+      geminiApiKey: apiKey,
+      geminiModel: db.config.geminiModel,
+      alreadyRepliedIds,
+      maxReplies: parseInt(process.env.AUTO_REPLY_MAX_PER_PASS || '3', 10),
+      log: (type, message, projectId) => addLog(type, message, projectId)
+    });
+
+    if (result.newRepliedIds.length > 0) {
+      const fresh = readDB();
+      const merged = [...(fresh.config.repliedMessageIds || []), ...result.newRepliedIds];
+      fresh.config.repliedMessageIds = [...new Set(merged)].slice(-500);
+      writeDB(fresh);
+    }
+
+    if (result.needingReply > 0 || result.replied > 0) {
+      addLog(
+        'info',
+        `[CHAT] Passada: scanned=${result.scanned}, pendentes=${result.needingReply}, respondidas=${result.replied}, falhas=${result.failed}.`
+      );
+    }
+  } finally {
+    bgChatReplyRunning = false;
+  }
+}
+
+function startAutoChatReplyLoop() {
+  const intervalMs = parseInt(process.env.AUTO_REPLY_INTERVAL_MS || '45000', 10);
+  console.log(`[SERVER] Auto-resposta de chat a cada ${intervalMs / 1000}s (quando ativada).`);
+
+  setInterval(() => {
+    runAutoChatReply().catch((err) => {
+      addLog('error', `[CHAT] Falha no loop de respostas: ${err.message}`);
+    });
+  }, intervalMs);
+}
+
 // Common core implementation of AISingleProject for API and backgrounds
 async function generateAISingleProject(projectId: string): Promise<Project> {
   const db = readDB();
@@ -740,6 +803,46 @@ app.post('/api/auto-mode/toggle', (req, res) => {
   res.json({ enabled: db.config.autoSubmit });
 });
 
+app.get('/api/chat-reply/status', (_req, res) => {
+  const db = readDB();
+  res.json({
+    enabled: db.config.autoReplyMessages === true,
+    running: bgChatReplyRunning,
+    repliedCount: (db.config.repliedMessageIds || []).length
+  });
+});
+
+app.post('/api/chat-reply/toggle', (req, res) => {
+  const db = readDB();
+  const enabled =
+    typeof req.body?.enabled === 'boolean' ? req.body.enabled : !db.config.autoReplyMessages;
+  db.config.autoReplyMessages = enabled;
+  writeDB(db);
+
+  if (enabled) {
+    addLog('info', '[CHAT] Auto-resposta ATIVADA — mensagens curtas e informais.');
+    void runAutoChatReply();
+  } else {
+    addLog('info', '[CHAT] Auto-resposta DESATIVADA.');
+  }
+
+  res.json({ enabled: db.config.autoReplyMessages });
+});
+
+app.post('/api/chat-reply/run', (req, res) => {
+  if (bgChatReplyRunning) {
+    return res.status(429).json({ error: 'Leitura de chat já em andamento.' });
+  }
+
+  const db = readDB();
+  if (!db.config.freelasSessionCookie) {
+    return res.status(400).json({ error: 'Cookie de sessão Workana ausente.' });
+  }
+
+  res.json({ success: true, message: 'Passada de chat iniciada.' });
+  void runAutoChatReply();
+});
+
 let autopilotRunning = false;
 
 // Autopilot: 10 primeiros "seen" → gerar → fila → enviar com pausas
@@ -805,6 +908,7 @@ async function startServer() {
     console.log(`[SERVER] workana-sniper executando em http://localhost:${PORT}`);
     startAutoScrapeLoop();
     startAutoPipelineLoop();
+    startAutoChatReplyLoop();
   });
 }
 

@@ -46,8 +46,10 @@ export interface SystemConfig {
   freelasSessionCookie: string;
   playwrightHeadless: boolean;
   autoSubmit: boolean;
+  autoReplyMessages: boolean;
   maxProposalsPerDay: number;
   useKeywordFilters: boolean;
   blacklistKeywords: string[];
   whitelistKeywords: string[];
+  repliedMessageIds?: string[];
 }

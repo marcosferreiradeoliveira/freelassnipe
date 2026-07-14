@@ -91,6 +91,10 @@ function normalizeJobUrl(url: string): string {
   return url;
 }
 
+function getJobSlugFromUrl(url: string): string | null {
+  return url.match(/\/job\/([^/?#]+)/)?.[1] || url.match(/\/messages\/bid\/([^/?#]+)/)?.[1] || null;
+}
+
 async function dismissPageOverlays(page: any) {
   await page.evaluate(() => {
     for (const selector of ['#workanaChat', '#onetrust-banner-sdk', '.modal.in', '.modal.show']) {
@@ -120,12 +124,54 @@ async function openBidForm(page: any, jobUrl: string, log: SubmitWorkerOptions['
     throw new Error('Projeto não encontrado no Workana (pode ter sido removido ou expirado).');
   }
 
-  const bidButton = page.locator('#bid_button').first();
-  if (!(await bidButton.isVisible().catch(() => false))) {
-    throw new Error('Botão para abrir o formulário de proposta não encontrado.');
+  const bidSelectors = [
+    'a[href*="/messages/bid/"]',
+    '#bid_button',
+    'a:has-text("Fazer uma proposta")',
+    'a:has-text("Envie uma proposta")',
+    'a:has-text("Enviar proposta")',
+    'button:has-text("Fazer uma proposta")',
+    'button:has-text("Enviar proposta")'
+  ];
+
+  let href: string | null = null;
+  for (const selector of bidSelectors) {
+    const candidate = page.locator(selector).first();
+    const found = (await candidate.count().catch(() => 0)) > 0;
+    if (!found) continue;
+
+    const candidateHref = await candidate.getAttribute('href').catch(() => null);
+    if (candidateHref?.includes('/signup') || candidateHref?.includes('/login')) {
+      href = candidateHref;
+      break;
+    }
+
+    if (candidateHref?.includes('/messages/bid/')) {
+      href = candidateHref;
+      break;
+    }
+
+    if (!candidateHref && (await candidate.isVisible().catch(() => false))) {
+      await candidate.click();
+      await page.waitForTimeout(2000);
+      if (page.url().includes('/messages/bid/')) {
+        href = page.url();
+        break;
+      }
+    }
   }
 
-  const href = await bidButton.getAttribute('href').catch(() => null);
+  if (!href) {
+    const slug = getJobSlugFromUrl(normalizedJobUrl);
+    if (slug) {
+      href = `${PLATFORM.baseUrl}/messages/bid/${slug}`;
+    }
+  }
+
+  if (!href) {
+    throw new Error('Link para abrir o formulário de proposta não encontrado.');
+  }
+
   if (!href || href.includes('/signup') || href.includes('/login')) {
     throw new Error(`Sessão inválida. Faça login novamente no ${PLATFORM.name}.`);
   }

@@ -230,14 +230,17 @@ export async function getJobBidStatus(page: any, jobUrl: string): Promise<JobBid
     return { ok: false, reason: 'project_not_found' };
   }
 
-  const bidButton = page.locator('#bid_button').first();
-  if (!(await bidButton.isVisible().catch(() => false))) {
+  const bidButton = page.locator('a[href*="/messages/bid/"], #bid_button').first();
+  if ((await bidButton.count().catch(() => 0)) === 0) {
     return { ok: false, reason: 'no_bid_button' };
   }
 
   const href = await bidButton.getAttribute('href').catch(() => null);
   if (!href || href.includes('/signup') || href.includes('/login')) {
     return { ok: false, reason: 'not_logged_in' };
+  }
+  if (href !== '#' && !href.includes('/messages/bid/')) {
+    return { ok: false, reason: 'no_bid_button' };
   }
 
   return { ok: true };

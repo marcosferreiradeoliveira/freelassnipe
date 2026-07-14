@@ -29,7 +29,8 @@ import {
   User,
   Eye,
   EyeOff,
-  Zap
+  Zap,
+  MessageSquare
 } from 'lucide-react';
 import { Project, ProjectStatus, SystemLog, SystemConfig } from './types';
 
@@ -51,6 +52,12 @@ export default function App() {
   const [isRunningWorker, setIsRunningWorker] = useState(false);
   const [isRunningAutopilot, setIsRunningAutopilot] = useState(false);
   const [isTogglingAutoMode, setIsTogglingAutoMode] = useState(false);
+  const [isTogglingChatReply, setIsTogglingChatReply] = useState(false);
+  const [chatReplyStatus, setChatReplyStatus] = useState({
+    enabled: false,
+    running: false,
+    repliedCount: 0
+  });
   const [autoModeStatus, setAutoModeStatus] = useState({
     enabled: false,
     pipelineRunning: false,
@@ -81,9 +88,11 @@ export default function App() {
     const interval = setInterval(() => {
       silentPoll();
       fetchAutoModeStatus();
+      fetchChatReplyStatus();
     }, 8000);
     
     fetchAutoModeStatus();
+    fetchChatReplyStatus();
     return () => clearInterval(interval);
   }, []);
 
@@ -96,6 +105,18 @@ export default function App() {
       }
     } catch (e) {
       console.error('Failed to fetch auto mode status', e);
+    }
+  };
+
+  const fetchChatReplyStatus = async () => {
+    try {
+      const res = await fetch('/api/chat-reply/status');
+      if (res.ok) {
+        const data = await res.json();
+        setChatReplyStatus(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch chat reply status', e);
     }
   };
 
@@ -328,6 +349,42 @@ export default function App() {
     }
   };
 
+  const handleToggleChatReply = async () => {
+    setIsTogglingChatReply(true);
+    try {
+      const res = await fetch('/api/chat-reply/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !chatReplyStatus.enabled })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setConfig((prev) => (prev ? { ...prev, autoReplyMessages: data.enabled } : prev));
+        await fetchChatReplyStatus();
+        await fetchLogs();
+      }
+    } catch (e) {
+      console.error('Failed to toggle chat reply', e);
+    } finally {
+      setIsTogglingChatReply(false);
+    }
+  };
+
+  const handleRunChatReply = async () => {
+    try {
+      const res = await fetch('/api/chat-reply/run', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Não foi possível iniciar a leitura do chat.');
+        return;
+      }
+      await fetchLogs();
+      await fetchChatReplyStatus();
+    } catch (e) {
+      console.error('Failed to run chat reply', e);
+    }
+  };
+
   const handleRunAutopilot = async () => {
     if (!confirm('Disparar autopilot nas 10 primeiras oportunidades "vistas"?\n\nGera propostas com IA, coloca na fila e envia com pausas anti-detecção (~45-90s entre envios).')) {
       return;
@@ -470,7 +527,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 w-full md:w-auto">
+        <div className="flex items-center gap-2 w-full md:w-auto flex-wrap justify-end">
           <button
             type="button"
             onClick={handleToggleAutoMode}
@@ -487,6 +544,27 @@ export default function App() {
               <Zap className={`w-4 h-4 ${autoModeStatus.enabled ? 'fill-current' : ''}`} />
             )}
             {autoModeStatus.enabled ? 'Sniper Automático ON' : 'Sniper Automático'}
+          </button>
+          <button
+            type="button"
+            onClick={handleToggleChatReply}
+            disabled={isTogglingChatReply}
+            className={`flex-1 md:flex-none py-2.5 px-4 rounded-xl font-black text-xs flex items-center justify-center gap-2 shadow-lg transition-all ${
+              chatReplyStatus.enabled
+                ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 ring-2 ring-amber-400/40'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+            }`}
+          >
+            {isTogglingChatReply ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <MessageSquare className={`w-4 h-4 ${chatReplyStatus.enabled ? 'fill-current' : ''}`} />
+            )}
+            {chatReplyStatus.enabled
+              ? chatReplyStatus.running
+                ? 'Chat respondendo...'
+                : 'Chat Auto ON'
+              : 'Chat Auto'}
           </button>
         </div>
 
@@ -557,6 +635,37 @@ export default function App() {
                   <span className={`text-[10px] px-2 py-0.5 font-bold rounded ${config.autoSubmit ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-blue-950 text-blue-400 border border-blue-900'}`}>
                     {config.autoSubmit ? 'SCRAPE + IA + ENVIO AUTOMÁTICOS' : 'MODO MANUAL (APENAS MODELAGEM IA)'}
                   </span>
+                </div>
+              </div>
+
+              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-200 block">Auto-resposta no Chat</label>
+                    <span className="text-[10px] text-slate-400">Lê inbox e responde msgs curtas/informais</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleToggleChatReply}
+                    disabled={isTogglingChatReply}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${config.autoReplyMessages ? 'bg-amber-500' : 'bg-slate-700'}`}
+                  >
+                    <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${config.autoReplyMessages ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className={`text-[10px] px-2 py-0.5 font-bold rounded ${config.autoReplyMessages ? 'bg-amber-950 text-amber-300 border border-amber-900' : 'bg-slate-900 text-slate-400 border border-slate-700'}`}>
+                    {config.autoReplyMessages
+                      ? `CHAT ON · ${chatReplyStatus.repliedCount} resp.`
+                      : 'CHAT OFF'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleRunChatReply}
+                    className="text-[10px] px-2 py-1 rounded bg-slate-900 border border-slate-700 text-slate-300 hover:text-white"
+                  >
+                    Rodar agora
+                  </button>
                 </div>
               </div>
 
