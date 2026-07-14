@@ -8,6 +8,8 @@ import {
   injectCookiesIntoContext,
   usePersistentProfile
 } from './browser-session.ts';
+import { collectClientMessagesForProposal } from './bid-page-messages.ts';
+import { generateClientMessageReply } from './generate-message-reply.ts';
 
 dotenv.config();
 
@@ -147,18 +149,53 @@ async function submitSingleProject(
     return false;
   }
 
+  let proposalText = project.generatedProposal || '';
+
+  try {
+    const clientMessages = await collectClientMessagesForProposal(page, project.url, bidUrl);
+    if (clientMessages.length > 0) {
+      project.clientMessages = clientMessages;
+      write(
+        'info',
+        `[DISPARADOR] ${clientMessages.length} mensagem(ns) do cliente detectada(s). Gerando resposta técnica...`,
+        project.id
+      );
+
+      const apiKey = config.geminiApiKey || process.env.GEMINI_API_KEY;
+      if (apiKey) {
+        const reply = await generateClientMessageReply({
+          apiKey,
+          model: config.geminiModel || process.env.GEMINI_MODEL,
+          projectTitle: project.title,
+          projectDescription: project.description,
+          clientMessages
+        });
+
+        if (reply) {
+          proposalText = `${proposalText.trim()}\n\n${reply}`.trim();
+          project.generatedProposal = proposalText;
+          write('success', `[DISPARADOR] Resposta às mensagens do cliente anexada à proposta.`, project.id);
+        }
+      } else {
+        write('warning', `[DISPARADOR] Mensagens do cliente detectadas, mas GEMINI_API_KEY ausente para gerar resposta.`, project.id);
+      }
+    }
+  } catch (err: any) {
+    write('warning', `[DISPARADOR] Falha ao checar/responder mensagens do cliente: ${err.message}`, project.id);
+  }
+
   const proposalInput = page.locator('#proposta').first();
   const priceInput = page.locator('#oferta').first();
   const timeInput = page.locator('#duracao-estimada').first();
   const submitButton = page.locator('#btnConcluirEnvioProposta').first();
 
-  if (!project.generatedProposal) {
+  if (!proposalText) {
     write('error', `[DISPARADOR] Texto da proposta vazio. Gere a proposta com IA antes de enviar.`, project.id);
     project.status = ProjectStatus.FAILED;
     return false;
   }
 
-  await proposalInput.fill(project.generatedProposal);
+  await proposalInput.fill(proposalText);
 
   if (project.suggestedPrice) {
     await priceInput.fill(String(project.suggestedPrice));
@@ -171,9 +208,10 @@ async function submitSingleProject(
   }
 
   const maxLen = await proposalInput.evaluate((el: HTMLTextAreaElement) => el.maxLength).catch(() => 3000);
-  if (maxLen > 0 && project.generatedProposal.length > maxLen) {
-    project.generatedProposal = project.generatedProposal.slice(0, maxLen);
-    await proposalInput.fill(project.generatedProposal);
+  if (maxLen > 0 && proposalText.length > maxLen) {
+    proposalText = proposalText.slice(0, maxLen);
+    project.generatedProposal = proposalText;
+    await proposalInput.fill(proposalText);
   }
 
   if (!shouldSubmit) {

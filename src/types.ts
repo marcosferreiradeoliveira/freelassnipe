@@ -25,6 +25,7 @@ export interface Project {
   suggestedTime?: number; // In days
   timestamp: string; // ISO String
   isExclusive?: boolean; // Projeto premium/exclusivo no 99freelas
+  clientMessages?: string[]; // Mensagens/perguntas do cliente detectadas no bid
 }
 
 export type LogType = 'info' | 'warning' | 'error' | 'success';

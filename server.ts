@@ -41,16 +41,37 @@ const DEFAULT_CONFIG: SystemConfig = {
   playwrightHeadless: process.env.PLAYWRIGHT_HEADLESS === 'true',
   autoSubmit: process.env.AUTO_SUBMIT === 'true',
   maxProposalsPerDay: parseInt(process.env.MAX_PROPOSALS_PER_DAY || '10', 10),
-  blacklistKeywords: ['design', 'logo', 'video', 'copywriter', 'tradutor', 'artes', 'redigi', 'escrever'],
-  whitelistKeywords: ['node', 'python', 'script', 'automação', 'automacao', 'bot', 'scrapper', 'raspar', 'ia', 'gemini', 'chatgpt', 'crawler', 'api', 'backend', 'vps', 'dados', 'integrar', 'integração'],
+  blacklistKeywords: ['tradutor', 'redigi', 'escrever'],
+  whitelistKeywords: [
+    'node', 'python', 'script', 'automação', 'automacao', 'bot', 'scrapper', 'raspar', 'ia', 'gemini', 'chatgpt',
+    'crawler', 'api', 'backend', 'vps', 'dados', 'integrar', 'integração', 'mobile', 'app', 'android', 'ios',
+    'flutter', 'react native', 'firebase', 'supabase', 'wordpress', 'landing', 'site', 'saas', 'crm', 'funil',
+    'vendas', 'marketing', 'tráfego', 'trafego', 'ads', 'lead', 'instagram', 'tiktok', 'video', 'vídeo',
+    'audiovisual', 'avatar', 'conteúdo', 'conteudo', 'design', 'logo', 'figma', 'ux', 'ui'
+  ],
   whitelistEnabled: true
 };
+
+function normalizeConfig(config: Partial<SystemConfig> = {}): SystemConfig {
+  const merged = { ...DEFAULT_CONFIG, ...config };
+  const oldBroadBlocks = new Set(['design', 'logo', 'video', 'copywriter', 'artes']);
+
+  return {
+    ...merged,
+    blacklistKeywords: (merged.blacklistKeywords || []).filter((kw) => !oldBroadBlocks.has(kw.toLowerCase())),
+    whitelistKeywords: [...new Set([...(merged.whitelistKeywords || []), ...DEFAULT_CONFIG.whitelistKeywords])]
+  };
+}
 
 function readDB(): DBStructure {
   try {
     if (fs.existsSync(DB_FILE)) {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
-      return JSON.parse(raw);
+      const db = JSON.parse(raw);
+      return {
+        ...db,
+        config: normalizeConfig(db.config)
+      };
     }
   } catch (error) {
     console.error('Error reading DB, using default structure', error);
@@ -204,7 +225,12 @@ app.post('/api/projects/reset', (req, res) => {
 });
 
 // Scraper Automation (`/api/scrape`)
-const SCRAPE_CATEGORY = 'web-mobile-e-software';
+const DEFAULT_SCRAPE_CATEGORIES = [
+  'web-mobile-e-software',
+  'vendas-e-marketing',
+  'fotografia-e-audiovisual',
+  'design-e-criacao'
+];
 const SCRAPE_START_PAGE = parseInt(process.env.SCRAPE_START_PAGE || '1', 10);
 
 const SCRAPE_FETCH_HEADERS = {
@@ -232,13 +258,27 @@ function decodeHtmlText(text: string): string {
     .trim();
 }
 
-function buildProjectsPageUrl(page: number): string {
-  const base = `https://www.99freelas.com.br/projects?categoria=${SCRAPE_CATEGORY}`;
+function getScrapeTargets(): string[] {
+  return (process.env.SCRAPE_CATEGORIES || DEFAULT_SCRAPE_CATEGORIES.join(','))
+    .split(',')
+    .map((category) => category.trim())
+    .filter(Boolean);
+}
+
+function buildProjectsPageUrl(target: string, page: number): string {
+  const cleanTarget = target.trim();
+  const query = cleanTarget.startsWith('http')
+    ? new URL(cleanTarget).searchParams.toString()
+    : cleanTarget.includes('=') || cleanTarget.includes('&')
+      ? cleanTarget.replace(/^\?/, '')
+      : `categoria=${encodeURIComponent(cleanTarget)}`;
+
+  const base = `https://www.99freelas.com.br/projects?${query}`;
   return page <= 1 ? base : `${base}&page=${page}`;
 }
 
-async function fetchProjectsPageHtml(page: number): Promise<string> {
-  const targetUrl = buildProjectsPageUrl(page);
+async function fetchProjectsPageHtml(target: string, page: number): Promise<string> {
+  const targetUrl = buildProjectsPageUrl(target, page);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
 
@@ -343,26 +383,59 @@ async function runWebScrape(options: { quiet?: boolean } = {}): Promise<ScrapeRe
 
     const db = readDB();
     const { whitelistKeywords, blacklistKeywords, whitelistEnabled } = db.config;
-    const targetUrl = buildProjectsPageUrl(SCRAPE_START_PAGE);
+    const scrapeTargets = getScrapeTargets();
 
     if (!quiet) {
-      addLog('info', `Conectando ao catálogo: ${targetUrl}`);
+      addLog('info', `Conectando ao catálogo (${scrapeTargets.length} categoria(s)): ${scrapeTargets.join(', ')}`);
     }
 
-    let html = '';
-    try {
-      html = await fetchProjectsPageHtml(SCRAPE_START_PAGE);
-    } catch (e: any) {
-      addLog('warning', `Erro ao carregar página ${SCRAPE_START_PAGE}: ${e.message}`);
+    const projectsById = new Map<string, Project>();
+    let totalParsedBeforeDedupe = 0;
+
+    for (const target of scrapeTargets) {
+      const targetUrl = buildProjectsPageUrl(target, SCRAPE_START_PAGE);
+
+      if (!quiet) {
+        addLog('info', `Conectando ao catálogo: ${targetUrl}`);
+      }
+
+      let html = '';
+      try {
+        html = await fetchProjectsPageHtml(target, SCRAPE_START_PAGE);
+      } catch (e: any) {
+        addLog('warning', `Erro ao carregar ${target} página ${SCRAPE_START_PAGE}: ${e.message}`);
+        continue;
+      }
+
+      const categoryProjects = html ? parseProjectsFromHtml(html) : [];
+      totalParsedBeforeDedupe += categoryProjects.length;
+
+      for (const project of categoryProjects) {
+        if (!projectsById.has(project.id)) {
+          projectsById.set(project.id, project);
+        }
+      }
+
+      if (!quiet) {
+        const categoryExclusive = categoryProjects.filter((p) => p.isExclusive).length;
+        const categoryPublic = categoryProjects.length - categoryExclusive;
+        addLog(
+          'info',
+          `${target}: ${categoryProjects.length} projetos extraídos (${categoryPublic} públicos, ${categoryExclusive} exclusivos).`
+        );
+      }
     }
 
-    const parsedProjects = html ? parseProjectsFromHtml(html) : [];
+    const parsedProjects = [...projectsById.values()];
     const exclusiveCount = parsedProjects.filter((p) => p.isExclusive).length;
     const publicCount = parsedProjects.length - exclusiveCount;
 
     if (!quiet) {
       if (parsedProjects.length > 0) {
-        addLog('info', `Catálogo: ${parsedProjects.length} projetos extraídos (${publicCount} públicos, ${exclusiveCount} exclusivos).`);
+        addLog(
+          'info',
+          `Catálogo total: ${parsedProjects.length} projetos únicos extraídos (${publicCount} públicos, ${exclusiveCount} exclusivos, ${totalParsedBeforeDedupe - parsedProjects.length} duplicados).`
+        );
       }
 
       if (parsedProjects.length === 0) {
@@ -513,6 +586,15 @@ async function triggerBgAutoGenerations() {
   }
 }
 
+function extractExplicitClientQuestions(description: string): string[] {
+  if (!/(informar|responda|perguntas?|dúvidas?|duvidas|esclareça|interessados)/i.test(description)) {
+    return [];
+  }
+
+  const numbered = description.match(/(?:^|\n)\s*\d+[\).\-\s:][^\n]+/g) || [];
+  return numbered.map((item) => item.trim()).filter((item) => item.length > 8);
+}
+
 // Common core implementation of AISingleProject for API and backgrounds
 async function generateAISingleProject(projectId: string): Promise<Project> {
   const db = readDB();
@@ -561,6 +643,18 @@ async function generateAISingleProject(projectId: string): Promise<Project> {
   addLog('info', `Enviando briefing de #${projectId} para análise do Gemini (${geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite'})...`, projectId);
 
   try {
+    const explicitQuestions = extractExplicitClientQuestions(project.description);
+    const storedMessages = project.clientMessages?.length ? project.clientMessages : [];
+    const clientMessagesBlock =
+      explicitQuestions.length > 0 || storedMessages.length > 0
+        ? `
+MENSAGENS/PERGUNTAS DO CLIENTE DETECTADAS:
+${[...storedMessages, ...explicitQuestions].map((m, i) => `${i + 1}. ${m}`).join('\n')}
+
+Se houver mensagens/perguntas acima, inclua UMA resposta curta (máx. 3-4 frases) na proposta, com conhecimento técnico concreto e reforço da prova gratuita via WhatsApp. Integre naturalmente ao texto — não use título "Resposta:".
+`
+        : '';
+
     const ai = new GoogleGenAI({
       apiKey: activeApiKey,
       httpOptions: {
@@ -580,11 +674,12 @@ DESCRIÇÃO COMPLETA DO CLIENTE:
 """
 ${project.description}
 """
+${clientMessagesBlock}
 
 DIRETRIZES DE PERSONALIDADE:
 - Escreva na mesma língua em que o anúncio está escrito.
 - Escreva como se estivesse respondendo um chat rápido. Nada de "Prezado" ou "Li seu projeto".
-- Use tom de parceria: "Fala, tudo bem? Vi seu projeto aqui e..."
+- Comece direto no problema do cliente — sem saudação inicial ("Fala", "Oi", "Olá", "E aí", "Tudo bem").
 - Seja direto e técnico, mas sem ser chato.
 
 ESTRUTURA DA PROPOSTA (campo "proposal" — siga rigorosamente, nesta ordem):
@@ -603,7 +698,7 @@ REGRAS DE FORMATAÇÃO DO CAMPO "proposal":
 - Pule uma linha obrigatoriamente após cada frase (use \\n\\n entre frases).
 - Máximo de 6 a 7 linhas/frases no total.
 - Não use negrito, títulos, listas, asteriscos ou fontes diferentes.
-- Proibido: "Minha proposta técnica", "Segue meu portfólio", "Cordialmente", "Prezado", "Atenciosamente".
+- Proibido: "Fala", "Oi", "Olá", "E aí", "Tudo bem" no início; "Minha proposta técnica", "Segue meu portfólio", "Cordialmente", "Prezado", "Atenciosamente".
 - O texto da proposta NÃO deve incluir valor em R$ nem prazo — isso vai em campos separados.
 
 CAMPOS NUMÉRICOS (fora do texto da proposta):
@@ -631,14 +726,14 @@ Retorne estritamente em JSON:
       model: activeModel,
       contents: promptText,
       config: {
-        systemInstruction: "Você é um Desenvolvedor Senior e Especialista em IA no 99Freelas. Escreva propostas curtas, humanas, com tom de chat, estrutura de gancho+portfólio+valor+teste grátis+pergunta, sem formatação markdown. Preço e prazo vão só nos campos JSON numéricos.",
+        systemInstruction: "Você é um Desenvolvedor Senior e Especialista em IA no 99Freelas. Escreva propostas curtas, humanas, com tom de chat, começando direto no problema (sem 'Fala', 'Oi' ou saudações). Estrutura: gancho+portfólio+valor+teste grátis+pergunta, sem formatação markdown. Preço e prazo vão só nos campos JSON numéricos.",
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             proposal: {
               type: Type.STRING,
-              description: "Proposta curta estilo chat: gancho do problema, prova de portfólio (URL exato https://buildai.dev.br ou https://www.youtube.com/@mobcontent — sem paths inventados), valor técnico, teste grátis via WhatsApp, pergunta de fechamento. Uma linha em branco entre cada frase. Máx 6-7 frases. Sem markdown, listas ou preço no texto."
+              description: "Proposta curta estilo chat, começando direto no problema (sem saudação tipo Fala/Oi). Gancho, prova de portfólio (URL exato https://buildai.dev.br ou https://www.youtube.com/@mobcontent — sem paths inventados), valor técnico, teste grátis via WhatsApp, pergunta de fechamento. Uma linha em branco entre cada frase. Máx 6-7 frases. Sem markdown, listas ou preço no texto."
             },
             suggestedPrice: {
               type: Type.NUMBER,
@@ -663,7 +758,9 @@ Retorne estritamente em JSON:
         .replace(/https?:\/\/(?:www\.)?buildai\.dev\.br\/[^\s)\]"']*/gi, 'https://buildai.dev.br')
         .replace(/https?:\/\/(?:www\.)?buildai\.dev\.br(?![/\w])/gi, 'https://buildai.dev.br')
         .replace(/https?:\/\/(?:www\.)?youtube\.com\/watch\?[^\s)\]"']*/gi, 'https://www.youtube.com/@mobcontent')
-        .replace(/https?:\/\/youtu\.be\/[^\s)\]"']*/gi, 'https://www.youtube.com/@mobcontent');
+        .replace(/https?:\/\/youtu\.be\/[^\s)\]"']*/gi, 'https://www.youtube.com/@mobcontent')
+        .replace(/^(?:Fala|Oi|Olá|Ola|E aí|E ai|Hey|Opa)[!,.\s]*(?:tudo bem\??\s*)?(?:vi (?:seu|o seu) projeto[^.!?]*[.!?]\s*)?/i, '')
+        .trim();
     }
 
     const priceFactor = parseFloat(process.env.PROPOSAL_PRICE_FACTOR || '0.5');

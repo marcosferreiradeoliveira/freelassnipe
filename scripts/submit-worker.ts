@@ -6,7 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
-import { runSubmitWorker } from './lib/submit-proposals.ts';
+import { runSubmitWorker } from '../lib/submit-proposals.ts';
 import { Project, ProjectStatus, SystemLog } from '../src/types';
 
 dotenv.config();
